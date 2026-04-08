@@ -1,0 +1,18 @@
+# Secretos y entornos locales
+.env
+.env.local
+*.pem
+id_rsa*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Artefactos locales opcionales
+artifacts/*.local.md
+
+# LangGraph / SQLite local
+checkpoints.db
+*.db-journal

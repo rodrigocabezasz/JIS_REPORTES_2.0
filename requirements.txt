@@ -1,0 +1,12 @@
+# JIS Reportes 2.0 — dependencias del workspace
+# Requiere Python 3.11, 3.12 o 3.13 (NO 3.14: el toolkit upstream no lo soporta aún).
+#
+#   py -3.12 -m venv .venv
+#   .\.venv\Scripts\Activate.ps1
+#   python -m pip install -U pip
+#   pip install -r requirements.txt
+
+-e ./framework/agent-service-toolkit
+
+# Scripts del workspace (verify_connectivity, etc.)
+mysql-connector-python>=9.0,<10
