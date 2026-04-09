@@ -119,12 +119,15 @@ def get_model(model_name: AllModelEnum, /) -> ModelT:
     if model_name in AWSModelName:
         return ChatBedrock(model_id=api_model_name, temperature=0.5)
     if model_name in OllamaModelName:
+        t = settings.OLLAMA_TEMPERATURE
         if settings.OLLAMA_BASE_URL:
             chat_ollama = ChatOllama(
-                model=settings.OLLAMA_MODEL, temperature=0.5, base_url=settings.OLLAMA_BASE_URL
+                model=settings.OLLAMA_MODEL,
+                temperature=t,
+                base_url=settings.OLLAMA_BASE_URL,
             )
         else:
-            chat_ollama = ChatOllama(model=settings.OLLAMA_MODEL, temperature=0.5)
+            chat_ollama = ChatOllama(model=settings.OLLAMA_MODEL, temperature=t)
         return chat_ollama
     if model_name in OpenRouterModelName:
         return ChatOpenAI(

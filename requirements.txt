@@ -8,5 +8,11 @@
 
 -e ./framework/agent-service-toolkit
 
+# Compat langgraph 1.0.x (evita ExecutionInfo / ServerInfo con prebuilt 1.0.9)
+langgraph-prebuilt>=1.0.8,<1.0.9
+
 # Scripts del workspace (verify_connectivity, etc.)
 mysql-connector-python>=9.0,<10
+
+# langgraph-checkpoint-sqlite 2.0.x llama conn.is_alive(); aiosqlite 0.22+ lo elimino (langgraph#6583)
+aiosqlite>=0.20,<0.22

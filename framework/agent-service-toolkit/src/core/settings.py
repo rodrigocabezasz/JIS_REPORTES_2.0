@@ -89,6 +89,8 @@ class Settings(BaseSettings):
     USE_AWS_BEDROCK: bool = False
     OLLAMA_MODEL: str | None = None
     OLLAMA_BASE_URL: str | None = None
+    # Baja = más fiel a datos de herramientas (recomendado para JIS / SQL)
+    OLLAMA_TEMPERATURE: float = Field(default=0.1, ge=0.0, le=2.0)
     USE_FAKE_MODEL: bool = False
     OPENROUTER_API_KEY: str | None = None
 

@@ -31,12 +31,34 @@ Plantilla: [.env.example](.env.example). Copia a `.env` (raíz) y a `framework/a
 
 ## Arrancar el agente (después del venv)
 
+Desde la **raíz** del workspace (con `.venv` activo):
+
+```powershell
+.\scripts\run_agent_service.ps1
+```
+
+En **otra** terminal:
+
+```powershell
+.\scripts\run_streamlit.ps1
+```
+
+**Manual:** el `streamlit_app.py` **no** está en la raíz; está en el toolkit:
+
 ```powershell
 cd framework\agent-service-toolkit
 python src\run_service.py
+# otra terminal, puedes quedarte en esa carpeta:
+streamlit run src\streamlit_app.py
 ```
 
-Streamlit de demo: `streamlit run src\streamlit_app.py` (misma carpeta, otra terminal).
+O desde la raíz:
+
+```powershell
+streamlit run framework\agent-service-toolkit\src\streamlit_app.py
+```
+
+`AGENT_URL` / `HOST` / `PORT` deben coincidir (por defecto API en `http://127.0.0.1:8080`).
 
 ## Estructura
 

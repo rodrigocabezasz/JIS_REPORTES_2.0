@@ -138,6 +138,8 @@ def main() -> int:
     print(f"MySQL: [{'OK' if ok_db else 'FAIL'}] {msg_db}")
 
     all_ok = ok and ok_db
+    ok_api = True
+    msg_api = ""
 
     if args.check_agent:
         ok_api, msg_api = check_agent_info()
@@ -148,6 +150,31 @@ def main() -> int:
         print("\nFase 0: conectividad lista (Ollama + MySQL" + (" + API" if args.check_agent else "") + ").")
     else:
         print("\nFase 0: revisa los FAIL arriba antes de seguir.")
+        if not ok:
+            if "127.0.0.1" in obase or "localhost" in obase.lower():
+                print(
+                    "  Ollama: abre el tunel (ej. SSH_TUNNEL_OLLAMA en .env) y deja esa terminal abierta."
+                )
+            else:
+                print(
+                    "  Ollama: revisa LAN/firewall o usa tunel SSH y OLLAMA_BASE_URL=http://127.0.0.1:11434"
+                )
+        if not ok_db and "10061" in msg_db:
+            print(
+                "  MySQL: abre el tunel (ej. SSH_TUNNEL_MYSQL en .env) con el puerto de DB_PORT."
+            )
+        if not ok_db and "1045" in msg_db:
+            print(
+                "  MySQL: usuario/clave no aceptados. Iguala DB_READONLY_* en .env raiz y en"
+                " framework/agent-service-toolkit/.env con el ODBC que pasa Test (sin espacios)."
+            )
+        if args.check_agent and not ok_api and (
+            "10061" in msg_api or "Connection refused" in msg_api or "deneg" in msg_api.lower()
+        ):
+            print(
+                "  API: arranca el servicio en otra terminal: .\\scripts\\run_agent_service.ps1"
+                " (luego vuelve a ejecutar este script)."
+            )
 
     return 0 if all_ok else 1
 

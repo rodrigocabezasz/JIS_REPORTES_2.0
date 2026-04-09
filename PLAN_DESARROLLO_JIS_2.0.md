@@ -216,9 +216,9 @@ Debe quedar **OK** también en **Agente API /info**.
 
 ### Fase 0 — Congelar decisiones y entornos
 
-- [ ] `.env` raíz + toolkit completos y verificados con `verify_connectivity.py`
-- [ ] Decidir si Backend_V2 arranca solo desde toolkit o se crea paquete `backend_v2/` desde el siguiente sprint
-- [ ] Inicializar **nuevo repo Git** en este workspace (cuando quieras) sin mezclar con legacy
+- [x] `.env` raíz + toolkit completos y verificados con `verify_connectivity.py`
+- [x] Repo GitHub [JIS_REPORTES_2.0](https://github.com/rodrigocabezasz/JIS_REPORTES_2.0) con monorepo (toolkit vendido, sin `legacy_repos/`)
+- [ ] **Decisión pendiente:** mantener solo el servicio del toolkit por ahora **o** empezar a mover rutas propias a `backend_v2/` (recomendación: una iteración más en toolkit, luego extraer)
 
 ### Fase 1 — Backend_V2 (núcleo agéntico)
 

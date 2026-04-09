@@ -16,6 +16,8 @@ classifiers = [
 requires-python = ">=3.11,<3.14"
 
 dependencies = [
+    # Pin: langgraph-checkpoint-sqlite usa Connection.is_alive(), removido en aiosqlite 0.22+
+    "aiosqlite>=0.20,<0.22",
     "docx2txt ~=0.8",
     "duckduckgo-search>=7.3.0",
     "fastapi ~=0.115.5",
@@ -35,6 +37,9 @@ dependencies = [
     "langchain-openai ~=1.0.2",
     "langfuse >=2.65.0",
     "langgraph ~=1.0.0",
+    # prebuilt 1.0.9+ requiere runtime.ExecutionInfo no presente en langgraph 1.0.x
+    # https://github.com/langchain-ai/langgraph/issues/7404
+    "langgraph-prebuilt>=1.0.8,<1.0.9",
     "langgraph-checkpoint-mongodb ~=0.1.3",
     "langgraph-checkpoint-postgres ~=2.0.13",
     "langgraph-checkpoint-sqlite ~=2.0.1",
