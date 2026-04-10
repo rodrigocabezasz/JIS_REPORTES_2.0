@@ -1787,3 +1787,385 @@ def jis_resumen_depositos(
         )
     except Exception as e:
         return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
+
+# --- Abonados / DTEs (CABECERA_ABONADOS; paridad GET /abonados y KPI /kpi/dtes/resumen) ---
+_MAX_FILAS_ABONADOS = 400
+_MAX_RANGO_DIAS_ABONADOS = 366
+_ABONADOS_COLLATE = "utf8mb4_unicode_ci"
+_IMPUTADA_POR_PAGAR_LITERAL = "imputada por pagar"
+
+
+def _abonados_parse_period(
+    fecha_desde: str | None,
+    fecha_hasta: str | None,
+    year: int | None,
+    month: int | None,
+) -> tuple[date, date, int, int, bool] | str:
+    d0 = _parse_iso_date_depositos(fecha_desde)
+    d1 = _parse_iso_date_depositos(fecha_hasta)
+    if d0 is None or d1 is None:
+        if year is None or month is None:
+            return (
+                "Indica periodo: fecha_documento_desde y fecha_documento_hasta (YYYY-MM-DD), "
+                "o year y month (mes calendario)."
+            )
+        y, m = int(year), int(month)
+        if not (1 <= m <= 12):
+            return "month debe estar entre 1 y 12."
+        d0 = date(y, m, 1)
+        d1 = date(y, m, monthrange(y, m)[1])
+        return d0, d1, y, m, True
+    y_ref, m_ref = d0.year, d0.month
+    if d0 > d1:
+        d0, d1 = d1, d0
+    span = (d1 - d0).days + 1
+    if span > _MAX_RANGO_DIAS_ABONADOS:
+        return (
+            f"Rango de {span} días: máximo {_MAX_RANGO_DIAS_ABONADOS} días. "
+            "Acorta el periodo o usa year+month."
+        )
+    return d0, d1, y_ref, m_ref, False
+
+
+def _abonados_append_filters(
+    conds: list[str],
+    params: list[Any],
+    fa: dict[str, Any],
+    *,
+    status_id: int | None,
+    imputada_por_pagar: bool | None,
+    branch_office_id: int | None,
+    sucursal_contiene: str | None,
+    responsable_sucursal_contiene: str | None,
+    rut_contiene: str | None,
+    cliente_contiene: str | None,
+    dte_type_id: int | None,
+    folio: int | None,
+) -> None:
+    c = _ABONADOS_COLLATE
+    if status_id is not None:
+        conds.append("ca.status_id = %s")
+        params.append(int(status_id))
+        fa["status_id"] = int(status_id)
+    elif imputada_por_pagar is True:
+        conds.append("LOWER(TRIM(COALESCE(ca.status, ''))) = %s")
+        params.append(_IMPUTADA_POR_PAGAR_LITERAL)
+        fa["imputada_por_pagar"] = True
+    if branch_office_id is not None:
+        conds.append("ca.branch_office_id = %s")
+        params.append(int(branch_office_id))
+        fa["branch_office_id"] = int(branch_office_id)
+    sc = (sucursal_contiene or "").strip()
+    if sc:
+        conds.append(f"LOWER(bo.branch_office COLLATE {c}) LIKE LOWER(%s)")
+        params.append(f"%{sc}%")
+        fa["sucursal_contiene"] = sc
+    rs = (responsable_sucursal_contiene or "").strip()
+    if rs:
+        conds.append(f"LOWER(bo.responsable COLLATE {c}) LIKE LOWER(%s)")
+        params.append(f"%{rs}%")
+        fa["responsable_sucursal_contiene"] = rs
+    rc = (rut_contiene or "").strip()
+    if rc:
+        conds.append(f"LOWER(COALESCE(ca.rut, '') COLLATE {c}) LIKE LOWER(%s)")
+        params.append(f"%{rc}%")
+        fa["rut_contiene"] = rc
+    cc = (cliente_contiene or "").strip()
+    if cc:
+        conds.append(f"LOWER(COALESCE(ca.cliente, '') COLLATE {c}) LIKE LOWER(%s)")
+        params.append(f"%{cc}%")
+        fa["cliente_contiene"] = cc
+    if dte_type_id is not None:
+        conds.append("ca.dte_type_id = %s")
+        params.append(int(dte_type_id))
+        fa["dte_type_id"] = int(dte_type_id)
+    if folio is not None:
+        conds.append("ca.folio = %s")
+        params.append(int(folio))
+        fa["folio"] = int(folio)
+
+
+@tool
+def jis_consultar_abonados(
+    fecha_documento_desde: str | None = None,
+    fecha_documento_hasta: str | None = None,
+    year: int | None = None,
+    month: int | None = None,
+    status_id: int | None = None,
+    imputada_por_pagar: bool | None = None,
+    branch_office_id: int | None = None,
+    sucursal_contiene: str | None = None,
+    responsable_sucursal_contiene: str | None = None,
+    rut_contiene: str | None = None,
+    cliente_contiene: str | None = None,
+    dte_type_id: int | None = None,
+    folio: int | None = None,
+) -> str:
+    """Listado de abonados / DTEs desde **CABECERA_ABONADOS** con tipo de documento (**dte_types**) y sucursal (**QRY_BRANCH_OFFICES**).
+
+    Paridad con el dashboard Track de Abonados (GET /abonados en jisreportes.com), con filtros por fecha de documento,
+    estado, sucursal, RUT, cliente y tipo DTE.
+
+    Args:
+        fecha_documento_desde / fecha_documento_hasta: rango inclusive sobre **ca.date**, o **year** + **month**.
+        status_id: ej. **4** para el corte KPI DTE pendientes del API legacy.
+        imputada_por_pagar: si True (sin status_id), filtra status «Imputada por pagar» (insensible a mayúsculas).
+        sucursal_contiene / responsable_sucursal_contiene: sobre columnas del maestro de sucursales.
+        dte_type_id: según catálogo **dte_types** (ej. 61 nota de crédito en entornos JIS).
+        folio: número de folio exacto.
+    """
+    miss = _missing_db_config()
+    if miss:
+        return json.dumps(
+            {"success": False, "error": "Faltan variables de entorno", "variables": miss},
+            ensure_ascii=False,
+        )
+
+    parsed = _abonados_parse_period(
+        fecha_documento_desde, fecha_documento_hasta, year, month
+    )
+    if isinstance(parsed, str):
+        return json.dumps({"success": False, "error": parsed}, ensure_ascii=False)
+    d0, d1, y_out, m_out, periodo_mes = parsed
+
+    conds: list[str] = [
+        "ca.date IS NOT NULL",
+        "ca.date >= %s",
+        "ca.date <= %s",
+    ]
+    params: list[Any] = [d0.isoformat(), d1.isoformat()]
+    fa: dict[str, Any] = {
+        "fecha_documento_desde": d0.isoformat(),
+        "fecha_documento_hasta": d1.isoformat(),
+    }
+    _abonados_append_filters(
+        conds,
+        params,
+        fa,
+        status_id=status_id,
+        imputada_por_pagar=imputada_por_pagar,
+        branch_office_id=branch_office_id,
+        sucursal_contiene=sucursal_contiene,
+        responsable_sucursal_contiene=responsable_sucursal_contiene,
+        rut_contiene=rut_contiene,
+        cliente_contiene=cliente_contiene,
+        dte_type_id=dte_type_id,
+        folio=folio,
+    )
+
+    where_sql = " AND ".join(conds)
+    query = f"""
+        SELECT
+            ca.id,
+            ca.date,
+            ca.rut,
+            ca.cliente,
+            ca.razon_social,
+            ca.folio,
+            ca.branch_office_id,
+            ca.dte_type_id,
+            dt.dte_type AS document_type,
+            ca.status_id,
+            ca.status,
+            ca.total,
+            ca.subtotal,
+            ca.tax,
+            ca.period,
+            ca.comment,
+            ca.payment_date,
+            bo.branch_office AS sucursal_nombre,
+            bo.responsable AS responsable_sucursal
+        FROM CABECERA_ABONADOS ca
+        LEFT JOIN dte_types dt ON ca.dte_type_id = dt.id
+        LEFT JOIN QRY_BRANCH_OFFICES bo ON bo.id = ca.branch_office_id
+        WHERE {where_sql}
+        ORDER BY ca.date DESC, ca.id DESC
+        LIMIT %s
+    """
+    params.append(_MAX_FILAS_ABONADOS + 1)
+
+    try:
+        conn = mysql.connector.connect(**_db_params())
+        cur = conn.cursor(dictionary=True)
+        cur.execute(query, tuple(params))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        truncated = len(rows) > _MAX_FILAS_ABONADOS
+        out_rows = rows[:_MAX_FILAS_ABONADOS] if truncated else rows
+        db_user = os.getenv("DB_USER") or os.getenv("DB_READONLY_USER") or ""
+        return json.dumps(
+            {
+                "success": True,
+                "source": "mysql",
+                "tipo_resultado": "abonados_listado",
+                "tabla_o_vista": "CABECERA_ABONADOS + dte_types + QRY_BRANCH_OFFICES",
+                "mysql_user": db_user,
+                "year": y_out,
+                "month": m_out,
+                "periodo_por_mes_calendario": periodo_mes,
+                "filtros_aplicados": fa,
+                "truncated": truncated,
+                "count": len(out_rows),
+                "data": out_rows,
+            },
+            default=str,
+            ensure_ascii=False,
+        )
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
+
+@tool
+def jis_resumen_abonados(
+    fecha_documento_desde: str | None = None,
+    fecha_documento_hasta: str | None = None,
+    year: int | None = None,
+    month: int | None = None,
+    status_id: int | None = None,
+    imputada_por_pagar: bool | None = None,
+    branch_office_id: int | None = None,
+    sucursal_contiene: str | None = None,
+    responsable_sucursal_contiene: str | None = None,
+) -> str:
+    """Resumen de abonados/DTEs: totales, desglose por **status**, KPI **status_id=4** y métrica «imputada por pagar».
+
+    Paridad con **GET /kpi/dtes/resumen** (conteo + monto subtotal con status_id=4) y agregados del dashboard **dtes.py**.
+    """
+    miss = _missing_db_config()
+    if miss:
+        return json.dumps(
+            {"success": False, "error": "Faltan variables de entorno", "variables": miss},
+            ensure_ascii=False,
+        )
+
+    parsed = _abonados_parse_period(
+        fecha_documento_desde, fecha_documento_hasta, year, month
+    )
+    if isinstance(parsed, str):
+        return json.dumps({"success": False, "error": parsed}, ensure_ascii=False)
+    d0, d1, y_out, m_out, periodo_mes = parsed
+
+    conds: list[str] = [
+        "ca.date IS NOT NULL",
+        "ca.date >= %s",
+        "ca.date <= %s",
+    ]
+    params_base: list[Any] = [d0.isoformat(), d1.isoformat()]
+    fa: dict[str, Any] = {
+        "fecha_documento_desde": d0.isoformat(),
+        "fecha_documento_hasta": d1.isoformat(),
+    }
+    _abonados_append_filters(
+        conds,
+        params_base,
+        fa,
+        status_id=status_id,
+        imputada_por_pagar=imputada_por_pagar,
+        branch_office_id=branch_office_id,
+        sucursal_contiene=sucursal_contiene,
+        responsable_sucursal_contiene=responsable_sucursal_contiene,
+        rut_contiene=None,
+        cliente_contiene=None,
+        dte_type_id=None,
+        folio=None,
+    )
+    base_where = " AND ".join(conds)
+    join_sql = """
+        FROM CABECERA_ABONADOS ca
+        LEFT JOIN QRY_BRANCH_OFFICES bo ON bo.id = ca.branch_office_id
+    """
+    c = _ABONADOS_COLLATE
+
+    sql_totals = f"""
+        SELECT
+            COUNT(*) AS total_registros,
+            COALESCE(SUM(ca.subtotal), 0) AS suma_subtotal,
+            COALESCE(SUM(ca.total), 0) AS suma_total
+        {join_sql}
+        WHERE {base_where}
+    """
+    sql_por_status = f"""
+        SELECT
+            COALESCE(ca.status, '') AS status,
+            COUNT(*) AS cantidad,
+            COALESCE(SUM(ca.subtotal), 0) AS suma_subtotal
+        {join_sql}
+        WHERE {base_where}
+        GROUP BY COALESCE(ca.status, '') COLLATE {c}
+        ORDER BY cantidad DESC
+    """
+    sql_kpi4 = f"""
+        SELECT COUNT(*) AS cantidad, COALESCE(SUM(ca.subtotal), 0) AS monto
+        {join_sql}
+        WHERE {base_where} AND ca.status_id = 4
+    """
+    sql_imp = f"""
+        SELECT COUNT(*) AS cantidad, COALESCE(SUM(ca.subtotal), 0) AS monto
+        {join_sql}
+        WHERE {base_where}
+          AND LOWER(TRIM(COALESCE(ca.status, ''))) = %s
+    """
+    params_imp = list(params_base) + [_IMPUTADA_POR_PAGAR_LITERAL]
+
+    try:
+        conn = mysql.connector.connect(**_db_params())
+        cur = conn.cursor(dictionary=True)
+        cur.execute(sql_totals, tuple(params_base))
+        agg = cur.fetchone()
+        cur.execute(sql_por_status, tuple(params_base))
+        por_st = cur.fetchall()
+        cur.execute(sql_kpi4, tuple(params_base))
+        kpi4 = cur.fetchone()
+        cur.execute(sql_imp, tuple(params_imp))
+        imp = cur.fetchone()
+        cur.close()
+        conn.close()
+        db_user = os.getenv("DB_USER") or os.getenv("DB_READONLY_USER") or ""
+        agg_d = agg if isinstance(agg, dict) else {}
+        k4 = kpi4 if isinstance(kpi4, dict) else {}
+        im = imp if isinstance(imp, dict) else {}
+        por_rows: list[dict[str, Any]] = []
+        for r in por_st or []:
+            if isinstance(r, dict):
+                por_rows.append(
+                    {
+                        "status": r.get("status"),
+                        "cantidad": int(r.get("cantidad") or 0),
+                        "suma_subtotal": r.get("suma_subtotal"),
+                    }
+                )
+        return json.dumps(
+            {
+                "success": True,
+                "source": "mysql",
+                "tipo_resultado": "abonados_resumen",
+                "tabla_o_vista": "CABECERA_ABONADOS + QRY_BRANCH_OFFICES",
+                "mysql_user": db_user,
+                "year": y_out,
+                "month": m_out,
+                "periodo_por_mes_calendario": periodo_mes,
+                "filtros_aplicados": fa,
+                "fecha_documento_desde": d0.isoformat(),
+                "fecha_documento_hasta": d1.isoformat(),
+                "total_registros": int(agg_d.get("total_registros") or 0),
+                "suma_subtotal": agg_d.get("suma_subtotal"),
+                "suma_total": agg_d.get("suma_total"),
+                "por_status": por_rows,
+                "kpi_dtes_pendientes": {
+                    "descripcion": "GET /kpi/dtes/resumen: status_id = 4 (mismo periodo y filtros).",
+                    "cantidad": int(k4.get("cantidad") or 0),
+                    "monto_subtotal": k4.get("monto"),
+                },
+                "imputada_por_pagar": {
+                    "descripcion": "Status «Imputada por pagar» en el periodo.",
+                    "cantidad": int(im.get("cantidad") or 0),
+                    "monto_subtotal": im.get("monto"),
+                },
+            },
+            default=str,
+            ensure_ascii=False,
+        )
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)

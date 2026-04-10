@@ -7,6 +7,7 @@ Frases en español **listas para copiar y pegar** en el chat, alineadas a las he
 - **Informe de ventas comparativo** (`jis_informe_ventas_comparativo`): mismos criterios que el informe gerencial en jisreportes.com — **ingresos = efectivo neto + tarjeta neta + abonados**; incluye presupuesto, variación YoY y desviación vs meta. En Streamlit, el detalle por sucursal/responsable muestra montos con **formato de moneda**.
 - **Ranking / top sucursales** (`jis_ranking_sucursales`): ordena por volumen con criterio **bruto** (no es el mismo número que el informe comparativo).
 - **Depósitos** (`jis_consultar_depositos`, `jis_resumen_depositos`): vista **`QRY_REPORTE_DEPOSITOS`**; el filtro de fechas usa **fecha de recaudación**. Por defecto se excluyen filas cuyo nombre de sucursal contiene **OFICINA** (como el KPI legacy). Listado: columnas recaudado / depositado / diferencia / días latencia. Resumen: mismas sumas agregadas, promedio de latencia total y promedio excluyendo “Depositado Correcto” y “Depositado a Favor” (seguimiento). Filtros opcionales en el resumen: sucursal, supervisor o **responsable_contiene**, estado.
+- **Abonados / DTEs** (`jis_consultar_abonados`, `jis_resumen_abonados`): tabla **`CABECERA_ABONADOS`** + tipo en **`dte_types`**; fecha de filtro = **date** del documento (no confundir con depósitos). **status_id=4** alinea el bloque KPI con **`/kpi/dtes/resumen`**. **imputada_por_pagar** replica el corte del dashboard Track (texto «imputada por pagar»). Sin sesión no hay filtro por “mis sucursales” del usuario.
 - Para matrices de prueba técnicas de sucursales (argumentos esperados por herramienta), ver también [`CASOS_PRUEBA_SUCURSALES.md`](./CASOS_PRUEBA_SUCURSALES.md).
 
 ---
@@ -175,7 +176,24 @@ Vista **`QRY_REPORTE_DEPOSITOS`**. Estados posibles en la base (literales): **Pe
 
 ---
 
-## 6. Checklist rápido antes de una demo
+## 6. Dominio: abonados y DTEs (Track)
+
+Tabla **`CABECERA_ABONADOS`**. El resumen incluye **kpi_dtes_pendientes** (`status_id = 4`, como el API legacy) y el bloque **imputada por pagar**.
+
+### 6.1 Resumen del mes
+
+- “Resumen de abonados de marzo 2026: totales, por status, KPI pendientes DTE y monto imputada por pagar.”
+- “Cuántos DTE con status_id 4 y monto subtotal en abril 2026.”
+
+### 6.2 Listados
+
+- “Lista documentos abonados de marzo 2026 con imputada por pagar.”
+- “Abonados de febrero 2026 para la sucursal que contenga Florida en el nombre.”
+- “DTEs del 2026-03-01 al 2026-03-15 con RUT que contenga 76123456.”
+
+---
+
+## 7. Checklist rápido antes de una demo
 
 | Objetivo | Ejemplo mínimo |
 |----------|-----------------|
@@ -185,6 +203,7 @@ Vista **`QRY_REPORTE_DEPOSITOS`**. Estados posibles en la base (literales): **Pe
 | Por responsable + filtro | “Ventas por responsable marzo 2026; solo los que contengan Gómez” |
 | Serie diaria | “Ventas día a día del 1 al 15 de marzo 2026” |
 | Depósitos | “Resumen de depósitos de marzo 2026” + “depósitos pendientes de marzo 2026” |
+| Abonados | “Resumen de abonados de marzo 2026” + “lista imputada por pagar marzo 2026” |
 
 ---
 

@@ -14,6 +14,7 @@ from langgraph.managed import RemainingSteps
 from langgraph.prebuilt import ToolNode
 
 from agents.jis_tools import (
+    jis_consultar_abonados,
     jis_consultar_depositos,
     jis_consultar_kpi_ingresos,
     jis_consultar_ventas_diarias,
@@ -23,6 +24,7 @@ from agents.jis_tools import (
     jis_obtener_evolucion_temporal,
     jis_obtener_resumen_ejecutivo,
     jis_ranking_sucursales,
+    jis_resumen_abonados,
     jis_resumen_depositos,
 )
 from agents.safeguard import Safeguard, SafeguardOutput, SafetyAssessment
@@ -45,6 +47,8 @@ tools = [
     jis_consultar_ventas_diarias,
     jis_consultar_depositos,
     jis_resumen_depositos,
+    jis_consultar_abonados,
+    jis_resumen_abonados,
 ]
 
 _TOOL_NAMES = frozenset(t.name for t in tools)
@@ -56,7 +60,8 @@ Eres el asistente de gestión de JIS PARKING (jisreportes). Fecha de hoy: {curre
 Tienes herramientas para: catálogo de sucursales (QRY_BRANCH_OFFICES), distribución y % por segmento/zona/región/
 comuna/marca, **informes de ventas** (mensuales y **diarios**), resumen ejecutivo agregado, ranking por mes,
 evolución temporal por sucursal, detalle KPI fila a fila (KPI_INGRESOS_IMG_MES), y **depósitos / recaudación**
-(vista **QRY_REPORTE_DEPOSITOS**: listado filtrado y resumen mensual), alineado a jisreportes.com.
+(vista **QRY_REPORTE_DEPOSITOS**: listado filtrado y resumen mensual), y **abonados / DTEs**
+(**CABECERA_ABONADOS** + **dte_types**), alineado a jisreportes.com (Track de Abonados y KPI DTE).
 
 Idioma (obligatorio):
 - Todas las respuestas al usuario deben estar en español (Chile o neutro). No uses inglés ni mezclas.
@@ -84,6 +89,8 @@ Elige UNA herramienta según la intención principal. Si faltan año o mes para 
 | Porcentaje o cantidad de sucursales **por segmento** (o zona, región, comuna, marca) | **jis_distribucion_sucursales** | `GROUP BY` + conteos y %; no uses solo jis_listar_sucursales para eso. |
 | **Depósitos** listados (pendientes, con diferencia, por sucursal/supervisor, rango de fechas de **recaudación**) | **jis_consultar_depositos** | `QRY_REPORTE_DEPOSITOS`; fechas YYYY-MM-DD o `year`+`month`; **estado_deposito** solo valores literales permitidos. |
 | **Resumen KPI depósitos** (totales, sumas recaudado/depositado/diferencia, latencia, latencia “seguimiento” sin correctos/a favor, por estado); mismo filtro que listado | **jis_resumen_depositos** | `year`+`month` o rango ISO; opcional: sucursal, supervisor/**responsable**, estado; excl. OFICINA por defecto. |
+| **Abonados / DTEs** listado (folio, RUT, cliente, status, montos, tipo documento, sucursal) por **fecha de documento** | **jis_consultar_abonados** | Rango ISO o `year`+`month`; opcional **status_id** (ej. 4 = KPI pendientes legacy), **imputada_por_pagar**, sucursal, responsable sucursal, RUT, cliente, **dte_type_id**, folio. |
+| **Resumen abonados** (totales, por status, KPI status_id=4, bloque imputada por pagar) | **jis_resumen_abonados** | Mismos filtros de periodo y sucursal que el listado (sin RUT/cliente/folio). |
 
 Reglas rápidas:
 - "Total / cuánto ganamos / suma del mes" → jis_obtener_resumen_ejecutivo (year, month, tipo_periodo si dicen acumulado).
@@ -97,6 +104,7 @@ Reglas rápidas:
 - "Depósitos pendientes" / "reporte de depósitos" / "diferencias en depósitos" / "latencia depósitos" / recaudación
   vs depositado → **jis_consultar_depositos** (tabla) o **jis_resumen_depositos** (agregados del mes).
 - Piden **totales del mes**, **cuántos por estado**, **suma de diferencias**, **montos recaudado/depositado**, **KPI días de retraso/latencia** (promedio general y excluyendo “Depositado Correcto” y “Depositado a Favor”) → **jis_resumen_depositos** (`year`, `month`, o fechas ISO; opcional sucursal / **responsable_contiene** / supervisor / estado).
+- “Abonados”, “DTEs”, “track abonados”, “imputada por pagar”, “pendientes DTE”, folio/RUT/cliente en documentos abonados → **jis_consultar_abonados** (tabla) o **jis_resumen_abonados** (agregados y KPI **status_id=4**).
 
 --- Depósitos (QRY_REPORTE_DEPOSITOS) ---
 
@@ -112,6 +120,14 @@ Reglas rápidas:
   Para id numérico → **branch_office_id**.
 - No confundas con **ventas diarias** (KPI_INGRESOS_DIARIO): depósitos = herramientas **jis_consultar_depositos** /
   **jis_resumen_depositos**.
+
+--- Abonados / DTEs (CABECERA_ABONADOS, dashboard Track jisreportes) ---
+
+- Fecha de corte: columna **date** del documento (`fecha_documento_desde` / `fecha_documento_hasta` o `year`+`month`).
+- **status_id=4** = mismo criterio que el KPI **GET /kpi/dtes/resumen** (DTE pendientes en el legacy).
+- **imputada_por_pagar=true** filtra el texto de status como en el front (**imputada por pagar**, minúsculas); no mezclar con **status_id** en la misma llamada (si mandás **status_id**, tiene prioridad).
+- **responsable_sucursal_contiene** = columna **responsable** del maestro **QRY_BRANCH_OFFICES** (supervisor del local), no confundir con depósitos (**Supervisor** en la vista de depósitos).
+- Sin login no hay “solo mis sucursales”: no inventes filtro por cartera de usuario.
 
 --- Informes de ventas (cuándo usar cada tool) ---
 
@@ -260,6 +276,7 @@ Datos reales (obligatorio, anti-alucinación):
 - Depósitos listado: filas de `QRY_REPORTE_DEPOSITOS`; indica truncated; estados = literales del JSON.
 - Resumen depósitos: total_registros, suma_monto_recaudado, suma_monto_depositado, suma_diferencia,
   promedio_dias_latencia, promedio_dias_latencia_seguimiento (sin correctos ni a favor), tabla por_estado.
+- Abonados listado/resumen: cifras del JSON; **kpi_dtes_pendientes** = status_id 4; **imputada_por_pagar** = bloque dedicado en resumen.
 
 Presentación:
 - El usuario no necesita JSON crudo salvo que pida depuración.
@@ -333,8 +350,11 @@ _INFORME_VENTAS_TOOL = "jis_informe_ventas_comparativo"
 _VENTAS_DIARIAS_TOOL = "jis_consultar_ventas_diarias"
 _DEPOSITOS_LISTADO_TOOL = "jis_consultar_depositos"
 _DEPOSITOS_RESUMEN_TOOL = "jis_resumen_depositos"
+_ABONADOS_LISTADO_TOOL = "jis_consultar_abonados"
+_ABONADOS_RESUMEN_TOOL = "jis_resumen_abonados"
 _MAX_SUCURSALES_TABLA = 400
 _MAX_DEPOSITOS_TABLA = 80
+_MAX_ABONADOS_TABLA = 60
 
 _MESES_ES = (
     "",
@@ -503,6 +523,32 @@ def _tool_is_depositos_resumen(msg: ToolMessage) -> bool:
     except json.JSONDecodeError:
         return False
     return isinstance(p, dict) and p.get("tipo_resultado") == "depositos_resumen"
+
+
+def _tool_is_abonados_listado(msg: ToolMessage) -> bool:
+    if getattr(msg, "name", None) == _ABONADOS_LISTADO_TOOL:
+        return True
+    raw = msg.content
+    if not isinstance(raw, str):
+        return False
+    try:
+        p = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(p, dict) and p.get("tipo_resultado") == "abonados_listado"
+
+
+def _tool_is_abonados_resumen(msg: ToolMessage) -> bool:
+    if getattr(msg, "name", None) == _ABONADOS_RESUMEN_TOOL:
+        return True
+    raw = msg.content
+    if not isinstance(raw, str):
+        return False
+    try:
+        p = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(p, dict) and p.get("tipo_resultado") == "abonados_resumen"
 
 
 def _format_ranking_sucursales_es(payload: dict[str, Any]) -> str:
@@ -806,6 +852,150 @@ def _format_depositos_resumen_es(payload: dict[str, Any]) -> str:
         if not isinstance(r, dict):
             continue
         lines.append(f"| {_md_cell(r.get('estado'))} | {_md_cell(r.get('cantidad'))} |")
+    return "\n".join(lines)
+
+
+def _format_abonados_listado_es(payload: dict[str, Any]) -> str:
+    rows = payload.get("data") or []
+    if not isinstance(rows, list):
+        rows = []
+    vista = payload.get("tabla_o_vista", "CABECERA_ABONADOS")
+    user = payload.get("mysql_user", "")
+    fa = payload.get("filtros_aplicados") or {}
+    trunc = bool(payload.get("truncated"))
+    intro = f"**Abonados / DTEs** · `{vista}`{f' · usuario `{user}`' if user else ''}\n\n"
+    if isinstance(fa, dict) and fa:
+        intro += f"**Documento (fecha):** {fa.get('fecha_documento_desde', '')} a {fa.get('fecha_documento_hasta', '')}"
+        if fa.get("status_id") is not None:
+            intro += f" · **status_id:** {fa.get('status_id')}"
+        if fa.get("imputada_por_pagar"):
+            intro += " · **solo imputada por pagar**"
+        if fa.get("branch_office_id") is not None:
+            intro += f" · **Sucursal id:** {fa.get('branch_office_id')}"
+        if fa.get("sucursal_contiene"):
+            intro += f" · **Sucursal:** «{fa.get('sucursal_contiene')}»"
+        if fa.get("responsable_sucursal_contiene"):
+            intro += f" · **Responsable sucursal:** «{fa.get('responsable_sucursal_contiene')}»"
+        if fa.get("rut_contiene"):
+            intro += f" · **RUT:** «{fa.get('rut_contiene')}»"
+        if fa.get("cliente_contiene"):
+            intro += f" · **Cliente:** «{fa.get('cliente_contiene')}»"
+        if fa.get("dte_type_id") is not None:
+            intro += f" · **dte_type_id:** {fa.get('dte_type_id')}"
+        if fa.get("folio") is not None:
+            intro += f" · **folio:** {fa.get('folio')}"
+        intro += "\n\n"
+    if not rows:
+        return intro + "No hay filas para ese criterio."
+
+    headers = [
+        "Fecha",
+        "Folio",
+        "Tipo",
+        "RUT",
+        "Cliente",
+        "Sucursal",
+        "Resp. suc.",
+        "Status",
+        "Subtotal",
+        "Total",
+        "Pago",
+    ]
+    keys = [
+        "date",
+        "folio",
+        "document_type",
+        "rut",
+        "cliente",
+        "sucursal_nombre",
+        "responsable_sucursal",
+        "status",
+        "subtotal",
+        "total",
+        "payment_date",
+    ]
+    show = rows[:_MAX_ABONADOS_TABLA]
+    table_trunc = len(rows) > _MAX_ABONADOS_TABLA
+    sep = "| " + " | ".join(["---"] * len(headers)) + " |"
+    head = "| " + " | ".join(headers) + " |"
+    lines_md = [intro, head, sep]
+    for r in show:
+        if not isinstance(r, dict):
+            continue
+        lines_md.append("| " + " | ".join(_md_cell(r.get(k)) for k in keys) + " |")
+    out = "\n".join(lines_md)
+    if table_trunc:
+        out += f"\n\n*Se muestran {_MAX_ABONADOS_TABLA} de {len(rows)} filas.*"
+    if trunc:
+        out += "\n\n*La consulta alcanzó el límite máximo de filas devueltas; puede haber más en la base.*"
+    return out
+
+
+def _format_abonados_resumen_es(payload: dict[str, Any]) -> str:
+    vista = payload.get("tabla_o_vista", "CABECERA_ABONADOS")
+    user = payload.get("mysql_user", "")
+    fd = payload.get("fecha_documento_desde", "")
+    fh = payload.get("fecha_documento_hasta", "")
+    por_mes = bool(payload.get("periodo_por_mes_calendario", True))
+    y = int(payload.get("year", 0))
+    m = int(payload.get("month", 0))
+    mes_txt = _MESES_ES[m] if 1 <= m <= 12 else str(m)
+    periodo_line = (
+        f"**Mes documento:** {mes_txt} {y}" if por_mes and y and m else f"**Fechas documento:** {fd} a {fh}"
+    )
+    fa = payload.get("filtros_aplicados") or {}
+    filtros_extra = ""
+    if isinstance(fa, dict):
+        bits: list[str] = []
+        if fa.get("status_id") is not None:
+            bits.append(f"status_id **{fa.get('status_id')}**")
+        if fa.get("imputada_por_pagar"):
+            bits.append("solo **imputada por pagar**")
+        if fa.get("branch_office_id") is not None:
+            bits.append(f"sucursal id **{fa.get('branch_office_id')}**")
+        if fa.get("sucursal_contiene"):
+            bits.append(f"sucursal «{fa.get('sucursal_contiene')}»")
+        if fa.get("responsable_sucursal_contiene"):
+            bits.append(f"responsable «{fa.get('responsable_sucursal_contiene')}»")
+        if bits:
+            filtros_extra = " · " + ", ".join(bits)
+    intro = (
+        f"**Resumen abonados / DTEs** · `{vista}`"
+        f"{f' · usuario `{user}`' if user else ''}\n\n"
+        f"{periodo_line}{filtros_extra}\n\n"
+    )
+    intro += (
+        f"- **Registros:** {int(payload.get('total_registros', 0))}\n"
+        f"- **Suma subtotal:** {_md_cell(payload.get('suma_subtotal'))}\n"
+        f"- **Suma total:** {_md_cell(payload.get('suma_total'))}\n\n"
+    )
+    kpi = payload.get("kpi_dtes_pendientes") or {}
+    imp = payload.get("imputada_por_pagar") or {}
+    if isinstance(kpi, dict):
+        intro += (
+            f"**KPI DTE pendientes (status_id=4, como /kpi/dtes/resumen):** "
+            f"{int(kpi.get('cantidad', 0))} docs · "
+            f"monto subtotal {_md_cell(kpi.get('monto_subtotal'))}\n\n"
+        )
+    if isinstance(imp, dict):
+        intro += (
+            f"**Imputada por pagar:** "
+            f"{int(imp.get('cantidad', 0))} docs · "
+            f"monto subtotal {_md_cell(imp.get('monto_subtotal'))}\n\n"
+        )
+    por = payload.get("por_status") or []
+    if not isinstance(por, list) or not por:
+        return intro + "*Sin desglose por status.*"
+    head = "| Status | Cantidad | Suma subtotal |"
+    sep = "| --- | ---: | ---: |"
+    lines = [intro + "**Por status**\n\n", head, sep]
+    for r in por:
+        if not isinstance(r, dict):
+            continue
+        lines.append(
+            f"| {_md_cell(r.get('status'))} | {_md_cell(r.get('cantidad'))} | "
+            f"{_md_cell(r.get('suma_subtotal'))} |"
+        )
     return "\n".join(lines)
 
 
@@ -1173,6 +1363,8 @@ async def after_tools(state: AgentState, config: RunnableConfig) -> AgentState:
             or _tool_is_ventas_diarias(last)
             or _tool_is_depositos_listado(last)
             or _tool_is_depositos_resumen(last)
+            or _tool_is_abonados_listado(last)
+            or _tool_is_abonados_resumen(last)
         ):
             return _err_ai(str(err))
         return {}
@@ -1202,6 +1394,10 @@ async def after_tools(state: AgentState, config: RunnableConfig) -> AgentState:
         return {"messages": [AIMessage(content=_format_depositos_listado_es(payload))]}
     if _tool_is_depositos_resumen(last):
         return {"messages": [AIMessage(content=_format_depositos_resumen_es(payload))]}
+    if _tool_is_abonados_listado(last):
+        return {"messages": [AIMessage(content=_format_abonados_listado_es(payload))]}
+    if _tool_is_abonados_resumen(last):
+        return {"messages": [AIMessage(content=_format_abonados_resumen_es(payload))]}
     return {}
 
 

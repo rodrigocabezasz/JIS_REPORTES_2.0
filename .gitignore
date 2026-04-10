@@ -14,6 +14,8 @@ venv/
 
 # Artefactos locales opcionales
 artifacts/*.local.md
+# Clones shallow de jisreportes_back / jisreportes_front (generados por scripts/build_jisreportes_source_mirror.py)
+artifacts/jisreportes_upstream/
 
 # LangGraph / SQLite local
 checkpoints.db

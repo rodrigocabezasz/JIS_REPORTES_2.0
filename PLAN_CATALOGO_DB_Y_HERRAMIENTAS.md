@@ -125,7 +125,7 @@ Esta sección es la **referencia funcional** para diseñar `jis_tools.py` y el p
 | Meta diaria PPTO | `QRY_PPTO_DIA` | combinar con ventas diarias o tool `jis_consultar_ppto_diario` | Resumen |
 | Depósitos | `QRY_REPORTE_DEPOSITOS` | `jis_consultar_depositos` (listado + filtros estado/fecha) | Inventario |
 | KPI depósitos | misma vista + agregación | `jis_resumen_depositos` (nueva) o args en la anterior | Resumen ejecutivo |
-| Abonados / DTEs | `CABECERA_ABONADOS` + `dte_types` + BO | `jis_listar_abonados` / `jis_resumen_abonados` (nuevas) | Inventario / resumen |
+| Abonados / DTEs | `CABECERA_ABONADOS` + `dte_types` + BO | `jis_consultar_abonados` / `jis_resumen_abonados` | Inventario / resumen |
 | Usuario ↔ sucursales | `users` + `branch_offices` | futura tool con contexto de usuario | Inventario |
 
 ---
