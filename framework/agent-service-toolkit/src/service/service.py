@@ -45,6 +45,28 @@ warnings.filterwarnings("ignore", category=LangChainBetaWarning)
 logger = logging.getLogger(__name__)
 
 
+def _user_message_for_llm_connection_failure(exc: BaseException) -> str | None:
+    """Detecta fallos típicos de red hacia Ollama/OpenAI-compatible (httpx)."""
+    text = f"{type(exc).__name__} {exc}".lower()
+    markers = (
+        "all connection attempts failed",
+        "connection refused",
+        "failed to establish a new connection",
+        "connecterror",
+        "name or service not known",
+        "timed out",
+    )
+    if any(m in text for m in markers):
+        return (
+            "No se pudo conectar al modelo (LLM). Si usas Ollama: inicia el servicio en la máquina donde "
+            "corre el modelo, revisa OLLAMA_BASE_URL y OLLAMA_MODEL en el .env del agent-service-toolkit "
+            "(debe coincidir con donde Streamlit/API resuelve la URL, p. ej. http://127.0.0.1:11434), "
+            "y abre el túnel SSH si el modelo está en otra red. MySQL y las tools no se ejecutan hasta que "
+            "el LLM responda."
+        )
+    return None
+
+
 def custom_generate_unique_id(route: APIRoute) -> str:
     """Generate idiomatic operation IDs for OpenAPI client generation."""
     return route.name
@@ -210,8 +232,12 @@ async def invoke(user_input: UserInput, agent_id: str = DEFAULT_AGENT) -> ChatMe
         output.run_id = str(run_id)
         return output
     except Exception as e:
-        logger.error(f"An exception occurred: {e}")
-        raise HTTPException(status_code=500, detail="Unexpected error")
+        logger.exception("invoke failed")
+        hint = _user_message_for_llm_connection_failure(e)
+        raise HTTPException(
+            status_code=503,
+            detail=hint or "Error inesperado al ejecutar el agente. Revisa el log del API.",
+        )
 
 
 async def message_generator(
@@ -321,8 +347,9 @@ async def message_generator(
                     # So we only print non-empty content.
                     yield f"data: {json.dumps({'type': 'token', 'content': convert_message_content_to_string(content)})}\n\n"
     except Exception as e:
-        logger.error(f"Error in message generator: {e}")
-        yield f"data: {json.dumps({'type': 'error', 'content': 'Internal server error'})}\n\n"
+        logger.exception("Error in message generator")
+        hint = _user_message_for_llm_connection_failure(e)
+        yield f"data: {json.dumps({'type': 'error', 'content': hint or 'Error interno del servidor. Revisa el log del API.'})}\n\n"
     finally:
         yield "data: [DONE]\n\n"
 

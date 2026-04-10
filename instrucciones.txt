@@ -1,0 +1,43 @@
+JIS Reportes 2.0 — desarrollo local (Windows / PowerShell)
+=========================================================
+
+Orden recomendado (evita error WinError 10061: nada escuchando en :8080):
+
+1) Túneles SSH (MySQL y/o Ollama en el VPS), si los usás:
+   .\scripts\start_ssh_tunnels.ps1
+   O en un solo paso con API + Streamlit:
+   .\scripts\run_dev.ps1
+   (run_dev abre túneles, levanta FastAPI en una ventana nueva y Streamlit acá.)
+
+2) Variables de entorno:
+   - Copiá .env.example a .env en la RAÍZ del repo y a framework/agent-service-toolkit/.env
+   - DB_HOST / DB_PORT deben apuntar a donde escucha MySQL (ej. 127.0.0.1:3307 si hay túnel).
+
+3) Entorno virtual (una vez):
+   .\scripts\create_venv.ps1
+   .\.venv\Scripts\Activate.ps1
+   python scripts\verify_connectivity.py
+
+4) Backend FastAPI del agente (puerto 8080 por defecto):
+   .\scripts\run_agent_service.ps1
+
+5) Streamlit (en OTRA terminal, con el venv activado o usa el script que llama a .venv\Scripts\python.exe):
+   .\scripts\run_streamlit.ps1
+   Si run_dev.ps1 ya abrió túneles y el API:
+   .\scripts\run_streamlit.ps1 -SkipTunnel
+
+AGENT_URL
+---------
+Streamlit debe apuntar al mismo host/puerto que el servicio. Por defecto:
+  http://127.0.0.1:8080
+Definilo en .env del toolkit (AGENT_URL) o como variable de entorno antes de streamlit.
+
+Agente jis-reports y stream de tokens
+-------------------------------------
+Para el agente "jis-reports", la UI usa stream de mensajes sin tokens por turno
+(stream_tokens=False) para no mostrar JSON de herramientas en bruto con Ollama.
+El código está en streamlit_app.py; otros agentes pueden seguir mostrando tokens.
+
+Frases de prueba / demos
+------------------------
+docs\PREGUNTAS_CHATBOT_REVISADAS.md

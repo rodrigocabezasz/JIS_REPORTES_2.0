@@ -11,6 +11,12 @@ from pydantic import ValidationError
 from client import AgentClient, AgentClientError
 from schema import ChatHistory, ChatMessage
 from schema.task_data import TaskData, TaskDataStatus
+from streamlit_jis_informe_ventas import (
+    INFORME_TOOL_NAME,
+    parse_informe_ventas_payload,
+    render_informe_ventas_report,
+    should_fold_informe_markdown,
+)
 from voice import VoiceManager
 
 # A Streamlit app for interacting with the langgraph agent via a simple chat interface.
@@ -259,11 +265,14 @@ async def main() -> None:
         st.chat_message("human").write(user_input)
         try:
             if use_streaming:
+                # jis-reports + Ollama/Qwen: a veces vuelcan la tool como texto; stream_tokens llena la UI con JSON repetido.
+                stream_tokens = agent_client.agent != "jis-reports"
                 stream = agent_client.astream(
                     message=user_input,
                     model=model,
                     thread_id=st.session_state.thread_id,
                     user_id=user_id,
+                    stream_tokens=stream_tokens,
                 )
                 await draw_messages(stream, is_new=True)
                 # Generate TTS audio for streaming response
@@ -334,6 +343,9 @@ async def draw_messages(
     streaming_content = ""
     streaming_placeholder = None
 
+    # Tras un informe de ventas con vista rica, el siguiente AIMessage repite el texto: lo pasamos a expander.
+    skip_fold_informe_markdown = False
+
     # Iterate over the messages and draw them
     while msg := await anext(messages_agen, None):
         # str message represents an intermediate token being streamed
@@ -381,6 +393,15 @@ async def draw_messages(
                             streaming_placeholder.write(msg.content)
                             streaming_content = ""
                             streaming_placeholder = None
+                        elif skip_fold_informe_markdown and should_fold_informe_markdown(
+                            msg.content
+                        ):
+                            skip_fold_informe_markdown = False
+                            with st.expander(
+                                "Definiciones y contexto (texto del agente)",
+                                expanded=False,
+                            ):
+                                st.markdown(msg.content)
                         else:
                             st.write(msg.content)
 
@@ -401,6 +422,8 @@ async def draw_messages(
                                 state="running" if is_new else "complete",
                             )
                             call_results[tool_call["id"]] = status
+
+                        informe_payloads: list[dict] = []
 
                         # Expect one ToolMessage for each tool call.
                         for tool_call in msg.tool_calls:
@@ -428,8 +451,23 @@ async def draw_messages(
                             if tool_result.tool_call_id:
                                 status = call_results[tool_result.tool_call_id]
                             status.write("Output:")
-                            status.write(tool_result.content)
+                            if tool_call["name"] == INFORME_TOOL_NAME:
+                                pl = parse_informe_ventas_payload(tool_result.content)
+                                if pl and pl.get("success"):
+                                    informe_payloads.append(pl)
+                                    skip_fold_informe_markdown = True
+                                    status.write("_Vista de informe debajo de esta sección._")
+                                    with st.expander("JSON crudo (depuración)", expanded=False):
+                                        st.code(tool_result.content, language="json")
+                                else:
+                                    status.write(tool_result.content)
+                            else:
+                                status.write(tool_result.content)
                             status.update(state="complete")
+
+                        for pl in informe_payloads:
+                            st.divider()
+                            render_informe_ventas_report(pl)
 
             case "custom":
                 # CustomData example used by the bg-task-agent

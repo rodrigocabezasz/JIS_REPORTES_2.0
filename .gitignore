@@ -3,6 +3,8 @@
 .env.local
 *.pem
 id_rsa*
+*api*key*.txt
+*clave*api*.txt
 
 # Python
 __pycache__/

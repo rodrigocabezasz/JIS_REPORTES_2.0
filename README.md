@@ -29,36 +29,34 @@ python scripts\verify_connectivity.py
 
 Plantilla: [.env.example](.env.example). Copia a `.env` (raíz) y a `framework/agent-service-toolkit/.env`. **No subas `.env` a Git.**
 
-## Arrancar el agente (después del venv)
+## Arrancar en desarrollo (orden recomendado)
 
-Desde la **raíz** del workspace (con `.venv` activo):
+1. **Túneles SSH** (si MySQL/Ollama están en el VPS): `.\scripts\start_ssh_tunnels.ps1`, o usa **`.\scripts\run_dev.ps1`** (túneles + API en ventana nueva + Streamlit).
+2. **API FastAPI** del agente en `http://127.0.0.1:8080` (por defecto): `.\scripts\run_agent_service.ps1`.
+3. **Streamlit** (otra terminal): `.\scripts\run_streamlit.ps1`. Si `run_dev` ya abrió túneles: `.\scripts\run_streamlit.ps1 -SkipTunnel`.
 
-```powershell
-.\scripts\run_agent_service.ps1
-```
+Si Streamlit muestra **10061**, el paso 2 no está corriendo o el puerto no coincide.
 
-En **otra** terminal:
+**`AGENT_URL`:** debe ser la URL base del servicio (ej. `http://127.0.0.1:8080`), igual que `HOST`/`PORT` del `run_service.py`. Definilo en el `.env` del toolkit.
 
-```powershell
-.\scripts\run_streamlit.ps1
-```
+**Agente `jis-reports`:** en Streamlit el streaming va por **mensajes**, no por **tokens** (`stream_tokens=False`), para que Ollama no vuelque JSON de herramientas en la conversación. Otros agentes pueden seguir con tokens.
 
-**Manual:** el `streamlit_app.py` **no** está en la raíz; está en el toolkit:
+Instrucciones resumidas en español: [instrucciones.txt](instrucciones.txt). Frases listas para probar el chat: [docs/PREGUNTAS_CHATBOT_REVISADAS.md](docs/PREGUNTAS_CHATBOT_REVISADAS.md).
+
+## Arrancar el agente (manual alternativo)
+
+Desde la **raíz** del workspace (con `.venv` activo) los scripts anteriores son la vía preferida. Equivalente manual:
 
 ```powershell
 cd framework\agent-service-toolkit
 python src\run_service.py
-# otra terminal, puedes quedarte en esa carpeta:
-streamlit run src\streamlit_app.py
 ```
 
-O desde la raíz:
+En otra terminal:
 
 ```powershell
 streamlit run framework\agent-service-toolkit\src\streamlit_app.py
 ```
-
-`AGENT_URL` / `HOST` / `PORT` deben coincidir (por defecto API en `http://127.0.0.1:8080`).
 
 ## Estructura
 
