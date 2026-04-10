@@ -67,8 +67,7 @@ streamlit run framework\agent-service-toolkit\src\streamlit_app.py
 | `scripts/` | Utilidades (`verify_connectivity.py`, `create_venv.ps1`) |
 | `artifacts/` | Salidas generadas (carpeta reservada) |
 | `PLAN_DESARROLLO_JIS_2.0.md` | Plan maestro |
-| `docs/JISREPORTES_COM_FUENTE_OFICIAL.md` | Espejo generado del código oficial jisreportes.com (back + front) y mapa de rutas/API |
-| `scripts/build_jisreportes_source_mirror.py` | Regenera el espejo: `python scripts/build_jisreportes_source_mirror.py` |
+| `scripts/build_jisreportes_source_mirror.py` | Genera en local `docs/JISREPORTES_COM_FUENTE_OFICIAL.md` (espejo back+front; **no** está en Git) |
 
 ## Primer push a GitHub
 

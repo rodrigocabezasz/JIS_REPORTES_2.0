@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Clona (o actualiza) jisreportes_back y jisreportes_front desde GitHub y genera un único .md en docs/ con:
+Clona (o actualiza) jisreportes_back y jisreportes_front desde GitHub y genera un único .md en docs/
+(**JISREPORTES_COM_FUENTE_OFICIAL.md** está en `.gitignore`: solo en tu equipo, no en GitHub) con:
 
 1. Metadatos (commits, URLs).
 2. Mapa automático: routers FastAPI → rutas HTTP.

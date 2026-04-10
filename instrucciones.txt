@@ -46,5 +46,6 @@ Espejo código oficial jisreportes.com (back + front GitHub)
 ----------------------------------------------------------
 python scripts\build_jisreportes_source_mirror.py
 
-Salida: docs\JISREPORTES_COM_FUENTE_OFICIAL.md (mapa de rutas + código .py completo).
-Los clones shallow quedan en artifacts\jisreportes_upstream\ (ignorados por Git).
+Salida local (no se sube a Git): docs\JISREPORTES_COM_FUENTE_OFICIAL.md
+(mapa de rutas + código .py completo). Los clones shallow quedan en
+artifacts\jisreportes_upstream\ (ignorados por Git).

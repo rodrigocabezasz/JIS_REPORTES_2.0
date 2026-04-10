@@ -17,6 +17,9 @@ artifacts/*.local.md
 # Clones shallow de jisreportes_back / jisreportes_front (generados por scripts/build_jisreportes_source_mirror.py)
 artifacts/jisreportes_upstream/
 
+# Espejo completo del código jisreportes.com (solo local; no subir a GitHub)
+docs/JISREPORTES_COM_FUENTE_OFICIAL.md
+
 # LangGraph / SQLite local
 checkpoints.db
 *.db-journal

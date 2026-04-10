@@ -1,6 +1,6 @@
 # JIS Reportes 2.0 vs jisreportes.com — paridad por dominio
 
-Referencia: `docs/JISREPORTES_COM_FUENTE_OFICIAL.md` (código oficial back/front) y `PLAN_CATALOGO_DB_Y_HERRAMIENTAS.md`.
+Referencia: espejo local `docs/JISREPORTES_COM_FUENTE_OFICIAL.md` (generar con `python scripts/build_jisreportes_source_mirror.py`; no versionado en Git) y `PLAN_CATALOGO_DB_Y_HERRAMIENTAS.md`.
 
 **Contexto:** jisreportes.com (Streamlit + FastAPI + ETL) y JIS 2.0 (chat sobre la misma MySQL) se complementan; el chat no reemplaza gráficos, PDFs ni flujos con **identidad de usuario** (cartera por rol).
 
