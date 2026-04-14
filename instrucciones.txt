@@ -42,6 +42,16 @@ Frases de prueba / demos
 ------------------------
 docs\PREGUNTAS_CHATBOT_REVISADAS.md
 
+Regresión automática (parsea ese MD y ejecuta el grafo jis-reports con Ollama + MySQL):
+  python scripts\regression_chatbot_preguntas.py
+  python scripts\regression_chatbot_preguntas.py --max 15
+  python scripts\regression_chatbot_preguntas.py --dry-run
+
+Deploy producción (decisión registrada)
+---------------------------------------
+Objetivo: correr en JIS Lab con Docker; MySQL en VPS vía túnel SSH. Checklist técnica:
+HOJA_RUTA_AGENTE_JIS_REPORTES.md (sección "Decisión — producción" y pendiente E).
+
 Espejo código oficial jisreportes.com (back + front GitHub)
 ----------------------------------------------------------
 python scripts\build_jisreportes_source_mirror.py

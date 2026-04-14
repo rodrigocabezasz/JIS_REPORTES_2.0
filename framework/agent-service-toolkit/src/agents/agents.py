@@ -34,7 +34,7 @@ class Agent:
 
 agents: dict[str, Agent] = {
     "jis-reports": Agent(
-        description="Asistente JIS PARKING: sucursales, ventas (mensual, comparativo YoY+ppto y diaria), depósitos/recaudación, abonados/DTEs, resumen, ranking, evolución y KPI detalle (MySQL).",
+        description="Asistente JIS PARKING: sucursales, ventas (mensual, comparativo YoY+ppto, diaria KPI y venta vs meta mensual), depósitos/recaudación, abonados/DTEs, resumen, ranking, evolución y KPI detalle (MySQL), más conocimiento documental indexado (RAG: reglamentos, políticas internas).",
         graph_like=jis_reports_agent,
     ),
     "chatbot": Agent(description="A simple chatbot.", graph_like=chatbot),

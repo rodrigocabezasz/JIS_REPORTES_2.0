@@ -4,7 +4,7 @@ import json
 import os
 import re
 from calendar import monthrange
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import mysql.connector
@@ -255,7 +255,10 @@ def jis_listar_sucursales(
     modo_respuesta: str | None = None,
     local_marca_o_comuna_contiene: str | None = None,
 ) -> str:
-    """Lista sucursales (vista QRY_BRANCH_OFFICES). No pide año/mes.
+    """**Catálogo / maestro de sucursales** (vista QRY_BRANCH_OFFICES). No pide año/mes ni fechas.
+
+    Usar cuando el usuario pide **listar sucursales**, **todas las activas**, **parkings/locales**, **id o DTE por nombre**,
+    **dónde queda** un local, etc. **No** usar para resúmenes de depósitos ni ventas (esas tools piden periodo u otros criterios).
 
     Por defecto solo sucursales activas (status_id = 7), alineado a jisreportes (GET /sucursales, joins).
 
@@ -286,8 +289,8 @@ def jis_listar_sucursales(
         solo_activas: True (default) = status_id 7. False = incluye otras filas de la vista (p. ej. totales
             asignados a un responsable con locales inactivos).
         solo_visibilidad_reporte: True = visibility_id 1 (criterio reportes por responsable en legacy).
-        modo_respuesta: "listar" (default) devuelve filas para tabla; "contar" para que el agente responda
-            solo el total en texto (misma consulta, menos ruido en chat).
+        modo_respuesta: "listar" (default) devuelve filas para tabla; **"contar"** para “¿cuántas sucursales activas?” /
+            “solo el total” / “dame el número” (el sistema devuelve `count` y respuesta breve). **No** confundir con resúmenes de depósitos.
         local_marca_o_comuna_contiene: Cuando el usuario nombra un lugar o texto que puede estar en el **nombre
             del local** (branch_office, ej. "LIDER STA ISABEL"), en la **marca** (principal) o en la **comuna**
             (commune), pero no sabes cuál. Usa esto en lugar de solo marca_contiene para evitar 0 resultados.
@@ -1113,6 +1116,192 @@ def _resolve_single_branch_id(
     return int(found[0]["id"]), None
 
 
+def _iso_date_key(val: Any) -> str:
+    if val is None:
+        return ""
+    if hasattr(val, "isoformat"):
+        return str(val.isoformat())[:10]
+    s = str(val).strip()
+    return s[:10] if len(s) >= 10 else s
+
+
+def _month_date_bounds(y: int, m: int) -> tuple[date, date]:
+    d0 = date(int(y), int(m), 1)
+    d1 = date(int(y), int(m), monthrange(int(y), int(m))[1])
+    return d0, d1
+
+
+@tool
+def jis_consultar_ventas_vs_meta(
+    year: int,
+    month: int,
+    branch_office_id: int | None = None,
+    sucursal_contiene: str | None = None,
+) -> str:
+    """**Venta real vs meta (presupuesto) diario** en un mes calendario, misma lógica que el dashboard
+    **Ventas vs Meta** de jisreportes.com (`GET /VentasVsMeta/analytics/ventas_vs_meta/`).
+
+    **Venta real** = `SUM(cash_amount + card_amount + subscribers)` desde **CABECERA_TRANSACCIONES** (criterio **bruto**,
+    no el informe gerencial neto). **Meta** = `SUM(ppto)` desde **QRY_PPTO_DIA**. Join a sucursales activas
+    (`QRY_BRANCH_OFFICES.status_id = 7`).
+
+    - Sin sucursal: devuelve **una fila por día** agregando **toda la empresa** (suma de sucursales por fecha).
+    - Con **branch_office_id** o **sucursal_contiene**: detalle diario **solo esa sucursal**.
+
+    Args:
+        year: Año del mes.
+        month: Mes 1-12.
+        branch_office_id: Opcional; id numérico de sucursal.
+        sucursal_contiene: Opcional; texto sobre **branch_office** (debe resolver a una sola sucursal activa).
+    """
+    miss = _missing_db_config()
+    if miss:
+        return json.dumps(
+            {"success": False, "error": "Faltan variables de entorno", "variables": miss},
+            ensure_ascii=False,
+        )
+    y, m = int(year), int(month)
+    if not (1 <= m <= 12):
+        return json.dumps({"success": False, "error": "month debe estar entre 1 y 12."}, ensure_ascii=False)
+
+    d0, d1 = _month_date_bounds(y, m)
+
+    try:
+        conn = mysql.connector.connect(**_db_params())
+        cur = conn.cursor(dictionary=True)
+
+        bid: int | None = None
+        bname: str | None = None
+        if branch_office_id is not None:
+            bid = int(branch_office_id)
+        elif (sucursal_contiene or "").strip():
+            bid, err = _resolve_single_branch_id(cur, sucursal_contiene)
+            if err:
+                cur.close()
+                conn.close()
+                return json.dumps({"success": False, "error": err}, ensure_ascii=False)
+
+        if bid is not None:
+            cur.execute(
+                "SELECT branch_office FROM QRY_BRANCH_OFFICES WHERE id = %s AND status_id = 7",
+                (bid,),
+            )
+            rbo = cur.fetchone()
+            if isinstance(rbo, dict):
+                bname = rbo.get("branch_office")
+
+        params_v: list[Any] = [d0.isoformat(), d1.isoformat()]
+        filt_v = ""
+        filt_p = ""
+        if bid is not None:
+            filt_v = " AND t.branch_office_id = %s"
+            filt_p = " AND p.branch_office_id = %s"
+            params_v.append(bid)
+
+        sql_v = f"""
+            SELECT t.date AS date,
+                   SUM(t.cash_amount + t.card_amount + t.subscribers) AS venta_real
+            FROM CABECERA_TRANSACCIONES t
+            INNER JOIN QRY_BRANCH_OFFICES bo ON bo.id = t.branch_office_id AND bo.status_id = 7
+            WHERE t.date >= %s AND t.date <= %s{filt_v}
+            GROUP BY t.date
+            ORDER BY t.date
+        """
+        cur.execute(sql_v, tuple(params_v))
+        rows_v = cur.fetchall()
+
+        params_p: list[Any] = [d0.isoformat(), d1.isoformat()]
+        if bid is not None:
+            params_p.append(bid)
+        sql_p = f"""
+            SELECT p.date AS date, SUM(p.ppto) AS meta
+            FROM QRY_PPTO_DIA p
+            INNER JOIN QRY_BRANCH_OFFICES bo ON bo.id = p.branch_office_id AND bo.status_id = 7
+            WHERE p.date >= %s AND p.date <= %s{filt_p}
+            GROUP BY p.date
+            ORDER BY p.date
+        """
+        cur.execute(sql_p, tuple(params_p))
+        rows_p = cur.fetchall()
+
+        cur.close()
+        conn.close()
+
+        vmap: dict[str, float] = {}
+        for row in rows_v or []:
+            if not isinstance(row, dict):
+                continue
+            k = _iso_date_key(row.get("date"))
+            if k:
+                vmap[k] = float(row.get("venta_real") or 0)
+
+        mmap: dict[str, float] = {}
+        for row in rows_p or []:
+            if not isinstance(row, dict):
+                continue
+            k = _iso_date_key(row.get("date"))
+            if k:
+                mmap[k] = float(row.get("meta") or 0)
+
+        data: list[dict[str, Any]] = []
+        total_v = 0.0
+        total_m = 0.0
+        d = d0
+        while d <= d1:
+            ks = d.isoformat()
+            vr = vmap.get(ks, 0.0)
+            mt = mmap.get(ks, 0.0)
+            diff = vr - mt
+            pct = (vr / mt * 100.0) if mt else None
+            row_out: dict[str, Any] = {
+                "fecha": ks,
+                "venta_real": vr,
+                "meta": mt,
+                "diferencia": diff,
+                "cumplimiento_pct": round(pct, 2) if pct is not None else None,
+            }
+            if bid is not None:
+                row_out["branch_office_id"] = bid
+                if bname:
+                    row_out["sucursal"] = bname
+            data.append(row_out)
+            total_v += vr
+            total_m += mt
+            d += timedelta(days=1)
+
+        db_user = os.getenv("DB_USER") or os.getenv("DB_READONLY_USER") or ""
+        modo = "sucursal" if bid is not None else "empresa"
+        tot_diff = total_v - total_m
+        tot_pct = (total_v / total_m * 100.0) if total_m else None
+
+        return json.dumps(
+            {
+                "success": True,
+                "source": "mysql",
+                "tipo_resultado": "ventas_vs_meta",
+                "tabla_o_vista": "CABECERA_TRANSACCIONES + QRY_PPTO_DIA + QRY_BRANCH_OFFICES",
+                "mysql_user": db_user,
+                "year": y,
+                "month": m,
+                "modo": modo,
+                "branch_office_id": bid,
+                "sucursal_nombre": bname,
+                "criterio_venta_real": "SUM(cash_amount + card_amount + subscribers) por día (bruto; paridad dashboard Ventas vs Meta)",
+                "criterio_meta": "SUM(ppto) en QRY_PPTO_DIA por día",
+                "total_venta_real": total_v,
+                "total_meta": total_m,
+                "total_diferencia": tot_diff,
+                "total_cumplimiento_pct": round(tot_pct, 2) if tot_pct is not None else None,
+                "count": len(data),
+                "data": data,
+            },
+            default=str,
+            ensure_ascii=False,
+        )
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
+
 @tool
 def jis_obtener_resumen_ejecutivo(
     year: int,
@@ -1614,7 +1803,10 @@ def jis_resumen_depositos(
     responsable_contiene: str | None = None,
     excluir_sucursal_oficina: bool | None = True,
 ) -> str:
-    """Resumen agregado de depósitos (Fecha_Recaudacion), vista **QRY_REPORTE_DEPOSITOS**.
+    """**Solo depósitos / recaudación:** resumen agregado (Fecha_Recaudacion), vista **QRY_REPORTE_DEPOSITOS**.
+
+    **No** usar para “lista todas las sucursales”, “¿cuántas sucursales activas?” ni catálogo de locales → eso es **jis_listar_sucursales**
+    (`modo_respuesta="contar"` si piden solo el número). Aquí **siempre** debes pasar **year+month** o rango **fecha_recaudacion_***.
 
     Alineado a KPI legacy jisreportes (totales, suma diferencias, latencia, desglose por estado). Permite el mismo
     corte que el listado: **sucursal**, **supervisor/responsable**, **estado**, rango de fechas o mes calendario.

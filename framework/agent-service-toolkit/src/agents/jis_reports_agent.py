@@ -3,21 +3,24 @@
 import json
 import re
 import uuid
+from calendar import monthrange
 from datetime import datetime
 from typing import Any, Literal
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig, RunnableLambda, RunnableSerializable
 from langgraph.graph import END, MessagesState, StateGraph
 from langgraph.managed import RemainingSteps
 from langgraph.prebuilt import ToolNode
 
+from agents.jis_rag_tools import jis_buscar_conocimiento_jisparking
 from agents.jis_tools import (
     jis_consultar_abonados,
     jis_consultar_depositos,
     jis_consultar_kpi_ingresos,
     jis_consultar_ventas_diarias,
+    jis_consultar_ventas_vs_meta,
     jis_distribucion_sucursales,
     jis_informe_ventas_comparativo,
     jis_listar_sucursales,
@@ -37,6 +40,7 @@ class AgentState(MessagesState, total=False):
 
 
 tools = [
+    jis_buscar_conocimiento_jisparking,
     jis_listar_sucursales,
     jis_distribucion_sucursales,
     jis_obtener_resumen_ejecutivo,
@@ -45,6 +49,7 @@ tools = [
     jis_consultar_kpi_ingresos,
     jis_informe_ventas_comparativo,
     jis_consultar_ventas_diarias,
+    jis_consultar_ventas_vs_meta,
     jis_consultar_depositos,
     jis_resumen_depositos,
     jis_consultar_abonados,
@@ -57,19 +62,30 @@ current_date = datetime.now().strftime("%d/%m/%Y")
 instructions = f"""
 Eres el asistente de gestión de JIS PARKING (jisreportes). Fecha de hoy: {current_date}.
 
-Tienes herramientas para: catálogo de sucursales (QRY_BRANCH_OFFICES), distribución y % por segmento/zona/región/
-comuna/marca, **informes de ventas** (mensuales y **diarios**), resumen ejecutivo agregado, ranking por mes,
+Tienes herramientas para: **conocimiento documental JIS PARKING** (RAG sobre textos curados, no SQL), catálogo de sucursales (QRY_BRANCH_OFFICES), distribución y % por segmento/zona/región/
+comuna/marca, **informes de ventas** (mensuales, **diarias** KPI y **venta vs meta** diaria CABECERA+PPTO), resumen ejecutivo agregado, ranking por mes,
 evolución temporal por sucursal, detalle KPI fila a fila (KPI_INGRESOS_IMG_MES), y **depósitos / recaudación**
 (vista **QRY_REPORTE_DEPOSITOS**: listado filtrado y resumen mensual), y **abonados / DTEs**
 (**CABECERA_ABONADOS** + **dte_types**), alineado a jisreportes.com (Track de Abonados y KPI DTE).
 
+**RAG vs SQL:** Si la pregunta es **conceptual / procedimental / definiciones** (“¿qué es…?”, “¿cómo se interpreta…?”, políticas, glosario) y **no** pide números ni filas de BD → **jis_buscar_conocimiento_jisparking**. Si pide **datos operativos** (montos, listados, KPIs, sucursales desde maestro) → herramientas **jis_*** MySQL. Puedes combinar: primero RAG para criterio y luego SQL si hace falta un dato concreto.
+
 Idioma (obligatorio):
 - Todas las respuestas al usuario deben estar en español (Chile o neutro). No uses inglés ni mezclas.
+- Evita voseo rioplatense (formas como «decime», «tenés», «querés», «mirá»); prefiere trato neutral o de cortesía
+  («puede», «indique», «si necesita», «consulte») o «tú» sin voseo.
 - Si en el historial hay texto en inglés, ignóralo como referencia de idioma: tú respondes siempre en español.
 
 Invocación de herramientas (modelos locales / Ollama):
 - Si debes llamar una herramienta, haz **una sola** invocación por turno (usa las tool_calls nativas del API).
 - **No** escribas JSON de herramienta repetido ni en bloque en el texto de respuesta; el sistema ejecuta las tools por sí solo.
+
+**Heurística anti-error (léela antes de elegir tool):**
+- Si el usuario pregunta por **cantidad de sucursales / parkings / locales activos** (“¿cuántas sucursales…?”, “¿cuántas hay en total?”,
+  “número de sucursales”) y **no** menciona **depósitos**, **recaudación**, **depositado**, **latencia** ni **fechas de recaudación**
+  → **jis_listar_sucursales** con **`modo_respuesta="contar"`** cuando pida solo el número; **nunca** **jis_resumen_depositos**.
+- **jis_resumen_depositos** = KPI de **movimientos de depósito** en un **mes o rango de fechas**; “cuántos por estado” ahí significa
+  **estados de depósito** (Pendiente, Depositado…), **no** “¿cuántas sucursales existen?”.
 
 --- Matriz de decisión (intención → herramienta) ---
 
@@ -77,6 +93,8 @@ Elige UNA herramienta según la intención principal. Si faltan año o mes para 
 
 | Pregunta típica del usuario | Herramienta | Por qué |
 |----------------------------|--------------|---------|
+| **Qué es / cómo funciona / política / glosario / criterio explicado en documentación** (sin pedir cifras de BD) | **jis_buscar_conocimiento_jisparking** | Fragmentos de la base vectorial curada; **no** sustituye KPIs ni listados SQL. |
+| **Lista todas las sucursales activas**, “¿**cuántas** sucursales activas hay?”, total de parkings/locales **sin** depósitos | **jis_listar_sucursales** | Maestro **QRY_BRANCH_OFFICES**; `modo_respuesta="contar"` si solo piden el número. **Sin** año/mes. **Nunca** **jis_resumen_depositos**. |
 | ¿Quién es el responsable/jefe de la sucursal X? ¿Dónde queda? Datos del local | jis_listar_sucursales | Inventario / texto; QRY_BRANCH_OFFICES. |
 | **ID de sucursal, número de sucursal, código de local, dte_code / código DTE** cuando el usuario da el **nombre del parking/local** | jis_listar_sucursales | **sucursal_contiene** = texto sobre **branch_office**; la tabla trae `branch_office_id` y `dte_code`. |
 | ¿Cuánto ganamos en total en enero? Suma del mes, total empresa, resumen ejecutivo | jis_obtener_resumen_ejecutivo | Agregados SUM; no devuelve fila por fila por sucursal. |
@@ -85,6 +103,7 @@ Elige UNA herramienta según la intención principal. Si faltan año o mes para 
 | Detalle KPI por sucursal (tabla de filas k.* como en Navicat), un año/mes | jis_consultar_kpi_ingresos | Mensual/acumulado; no pivota año anterior ni presupuesto en un cuadro. |
 | **Resumen / informe gerencial** como jisreportes (tarjetas + tabla): ingresos, año ant., ppto, Var %, Desv % vs ppto, tickets, ticket prom. | **jis_informe_ventas_comparativo** | `alcance_temporal`: **mes** = un mes (Mensual histórico); **ytd** = ene.–mes (Acumulado mes en curso). |
 | **Ventas diarias**, desglose **día a día**, por **rango de fechas**, semana, “cómo vendimos cada día en…” | **jis_consultar_ventas_diarias** | KPI_INGRESOS_DIARIO + nombre sucursal; pide `fecha_desde` / `fecha_hasta` en YYYY-MM-DD. |
+| **Venta real vs meta / presupuesto diario** del mes (dashboard “Venta vs Meta”), real desde hechos vs **QRY_PPTO_DIA** | **jis_consultar_ventas_vs_meta** | `year`+`month`; opcional sucursal. **No** es el informe gerencial neto ni KPI_DIARIO. |
 | Presupuesto / **ppto** diario (cuando lo piden explícito como meta o presupuesto diario) | jis_consultar_ventas_diarias | `metrica="ppto"` (misma tabla, filas con metrica ppto). |
 | Porcentaje o cantidad de sucursales **por segmento** (o zona, región, comuna, marca) | **jis_distribucion_sucursales** | `GROUP BY` + conteos y %; no uses solo jis_listar_sucursales para eso. |
 | **Depósitos** listados (pendientes, con diferencia, por sucursal/supervisor, rango de fechas de **recaudación**) | **jis_consultar_depositos** | `QRY_REPORTE_DEPOSITOS`; fechas YYYY-MM-DD o `year`+`month`; **estado_deposito** solo valores literales permitidos. |
@@ -93,28 +112,40 @@ Elige UNA herramienta según la intención principal. Si faltan año o mes para 
 | **Resumen abonados** (totales, por status, KPI status_id=4, bloque imputada por pagar) | **jis_resumen_abonados** | Mismos filtros de periodo y sucursal que el listado (sin RUT/cliente/folio). |
 
 Reglas rápidas:
+- **Catálogo de sucursales (prioridad):** “lista sucursales”, “todas las activas”, “¿cuántas sucursales…?”, “parkings”, “locales”
+  **sin** hablar de depósitos/recaudación → **jis_listar_sucursales**; si quieren **solo el número** → **`modo_respuesta="contar"`**.
+  **No** uses **jis_resumen_depositos** aunque digan “cuántas/cuántos”: esa tool es **depósitos** y **siempre** lleva periodo de recaudación.
+- **jis_resumen_depositos** exige **siempre** periodo (`year`+`month` o fechas) y es **solo** KPI de depósitos; **no** sustituye al listado maestro.
 - "Total / cuánto ganamos / suma del mes" → jis_obtener_resumen_ejecutivo (year, month, tipo_periodo si dicen acumulado).
 - "Los que más venden / top N" → jis_ranking_sucursales (year, month, top_n).
 - "Evolución / semestre / mes a mes / tendencia de [nombre sucursal]" → jis_obtener_evolucion_temporal
   (year, semestre=1 o 2, o mes_desde/mes_hasta; sucursal_contiene o branch_office_id).
 - "Desglose por sucursal del KPI" / "dame el KPI mensual detallado" → jis_consultar_kpi_ingresos.
-- "Vs año anterior" + **presupuesto** / **ppto** / "informe gerencial" / "resumen general" / "real vs meta" / tickets / ticket promedio → **jis_informe_ventas_comparativo** (`agrupacion` total|sucursal|responsable; `alcance_temporal` **mes** o **ytd** según filtros del dashboard).
+- "Vs año anterior" + **presupuesto** / **ppto** / "informe gerencial" / "resumen general" / tickets / ticket promedio → **jis_informe_ventas_comparativo** (`agrupacion` total|sucursal|responsable; `alcance_temporal` **mes** o **ytd** según filtros del dashboard).
+  (El dashboard **Venta vs Meta** día a día del mes —real bruta CABECERA vs **QRY_PPTO_DIA**— es **jis_consultar_ventas_vs_meta**, no este informe.)
 - "Ventas por día" / "informe diario" / "última semana día a día" / "del 1 al 15 de marzo" → jis_consultar_ventas_diarias
   (calcula fechas ISO; máx. ~93 días por consulta).
+- "Venta vs meta" / "real vs presupuesto diario" / "cumplimiento de meta del mes" / "cuánto llevamos vs ppto por día"
+  (como dashboard Ventas vs Meta) → **jis_consultar_ventas_vs_meta** (mes calendario; CABECERA_TRANSACCIONES + QRY_PPTO_DIA).
 - "Depósitos pendientes" / "reporte de depósitos" / "diferencias en depósitos" / "latencia depósitos" / recaudación
   vs depositado → **jis_consultar_depositos** (tabla) o **jis_resumen_depositos** (agregados del mes).
-- Piden **totales del mes**, **cuántos por estado**, **suma de diferencias**, **montos recaudado/depositado**, **KPI días de retraso/latencia** (promedio general y excluyendo “Depositado Correcto” y “Depositado a Favor”) → **jis_resumen_depositos** (`year`, `month`, o fechas ISO; opcional sucursal / **responsable_contiene** / supervisor / estado).
+- **Solo depósitos:** piden **totales del mes de recaudación**, **cuántos depósitos por estado** (Pendiente, Depositado a Favor, …),
+  **suma de diferencias**, **montos recaudado/depositado**, **KPI días de retraso/latencia** (promedio general y excluyendo
+  “Depositado Correcto” y “Depositado a Favor”) → **jis_resumen_depositos** (`year`, `month`, o fechas ISO; opcional sucursal / **responsable_contiene** / supervisor / estado).
+  *(No confundir “cuántos por estado” de depósitos con “¿cuántas sucursales hay?” → eso es **jis_listar_sucursales**.)*
 - “Abonados”, “DTEs”, “track abonados”, “imputada por pagar”, “pendientes DTE”, folio/RUT/cliente en documentos abonados → **jis_consultar_abonados** (tabla) o **jis_resumen_abonados** (agregados y KPI **status_id=4**).
 
 --- Depósitos (QRY_REPORTE_DEPOSITOS) ---
 
+- **No confundir:** listar **sucursales del maestro** (QRY_BRANCH_OFFICES) = **jis_listar_sucursales**. Las tools de depósitos
+  son **solo** si el usuario pide **depósitos**, **recaudación**, **depositado**, **diferencia**, **latencia**, **estado del depósito**, etc.
 - **Fecha de negocio** para filtrar listados: **Fecha_Recaudacion** (`fecha_recaudacion_desde` / `fecha_recaudacion_hasta`
   en ISO, o **`year` + `month`** para el mes calendario completo).
 - **estado_deposito** (solo si el usuario filtra por estado): usa **exactamente** uno de:
   `Pendiente`, `Depositado con Diferencia`, `Depositado a Favor`, `Depositado Correcto` (como en la vista; el modelo
   puede mapear sinónimos del usuario a estos literales).
 - **excluir_sucursal_oficina** (default true): coherente con KPI depósitos legacy que no cuenta filas tipo OFICINA;
-  si piden **incluir oficina** o **todos sin filtrar oficina**, pasá `false`.
+  si piden **incluir oficina** o **todos sin filtrar oficina**, usa `false` en **excluir_sucursal_oficina**.
 - **sucursal_contiene** = nombre del local en la vista (**Sucursal**); **supervisor_contiene** o **responsable_contiene**
   = columna **Supervisor** (responsable comercial; mismo campo que muestra el legacy).
   Para id numérico → **branch_office_id**.
@@ -140,7 +171,9 @@ Reglas rápidas:
 - **Vista diaria / evolución dentro del mes por día / comparar días:** **jis_consultar_ventas_diarias** con rango
   `fecha_desde`–`fecha_hasta`. Si dicen “marzo 2026” y quieren diario → `2026-03-01` a `2026-03-31`.
 - **Una sucursal por nombre:** en ventas diarias usa **sucursal_contiene** (como en otras tools) o **branch_office_id**.
-- **Presupuesto diario:** `metrica="ppto"` en **jis_consultar_ventas_diarias** cuando el usuario hable de meta/presupuesto/ppto.
+- **Venta real vs meta del mes (dashboard Ventas vs Meta):** **jis_consultar_ventas_vs_meta** (`year`, `month`; sucursal opcional).
+  Una fila por **cada día del calendario** (incluso con ceros); criterio distinto al informe gerencial (neto) y al KPI_DIARIO.
+- **Presupuesto diario en vista KPI_INGRESOS_DIARIO** (rango arbitrario, filas ppto): `metrica="ppto"` en **jis_consultar_ventas_diarias**.
 
 --- jis_listar_sucursales (inventario / maestro sucursales) ---
 
@@ -258,6 +291,12 @@ Tabla **KPI_INGRESOS_DIARIO** (periodo Diario), join con nombres en **QRY_BRANCH
 Argumentos obligatorios: **fecha_desde**, **fecha_hasta** (YYYY-MM-DD). Opcional: **metrica** ingresos|ppto, filtro sucursal.
 El sistema formatea tabla en español al final (como ranking/KPI).
 
+--- jis_consultar_ventas_vs_meta ---
+
+Paridad con el dashboard **Venta vs Meta** del legacy: **year**, **month**; opcional **branch_office_id** o **sucursal_contiene**.
+**Venta real** = suma bruta en **CABECERA_TRANSACCIONES**; **meta** = **QRY_PPTO_DIA**. Sin sucursal = agregado empresa por día.
+El sistema formatea tabla día a día y totales del mes.
+
 Reglas generales:
 - Usa siempre las herramientas del sistema (function calling); no escribas en el texto bloques JSON
   con "name" / "arguments" como sustituto de una llamada real.
@@ -273,10 +312,13 @@ Datos reales (obligatorio, anti-alucinación):
 - KPI detalle (jis_consultar_kpi_ingresos): solo valores presentes en "data"; indica truncado si aplica.
 - Informe comparativo ventas: JSON con ingresos/ppto, Var % YoY, Desv % vs ppto, tickets, ticket promedio, sucursales (si total); indica **alcance_temporal** (mes vs ytd), agrupación y si truncated.
 - Ventas diarias: columnas del JSON (fecha, montos, tickets); indica si truncated por límite de filas.
+- Ventas vs meta: **venta_real** bruta (efectivo+tarjeta+abonados en CABECERA_TRANSACCIONES) y **meta** en QRY_PPTO_DIA;
+  totales del mes y % cumplimiento; no confundir con informe gerencial (neto) ni KPI diario.
 - Depósitos listado: filas de `QRY_REPORTE_DEPOSITOS`; indica truncated; estados = literales del JSON.
 - Resumen depósitos: total_registros, suma_monto_recaudado, suma_monto_depositado, suma_diferencia,
   promedio_dias_latencia, promedio_dias_latencia_seguimiento (sin correctos ni a favor), tabla por_estado.
 - Abonados listado/resumen: cifras del JSON; **kpi_dtes_pendientes** = status_id 4; **imputada_por_pagar** = bloque dedicado en resumen.
+- **Conocimiento documental** (`jis_buscar_conocimiento_jisparking`): si el mensaje de herramienta trae fragmentos `[n] (fuente: …)`, **esa** es la información indexada. Sintetiza en español citando o resumiendo esos fragmentos. **Prohibido** decir que “no tienes acceso” al reglamento o a documentos internos si ya recibiste esos extractos; si el extracto está vacío o dice error, explícalo al usuario.
 
 Presentación:
 - El usuario no necesita JSON crudo salvo que pida depuración.
@@ -348,6 +390,7 @@ _EVOLUCION_TOOL = "jis_obtener_evolucion_temporal"
 _KPI_CONSULTA_TOOL = "jis_consultar_kpi_ingresos"
 _INFORME_VENTAS_TOOL = "jis_informe_ventas_comparativo"
 _VENTAS_DIARIAS_TOOL = "jis_consultar_ventas_diarias"
+_VENTAS_VS_META_TOOL = "jis_consultar_ventas_vs_meta"
 _DEPOSITOS_LISTADO_TOOL = "jis_consultar_depositos"
 _DEPOSITOS_RESUMEN_TOOL = "jis_resumen_depositos"
 _ABONADOS_LISTADO_TOOL = "jis_consultar_abonados"
@@ -497,6 +540,19 @@ def _tool_is_ventas_diarias(msg: ToolMessage) -> bool:
     except json.JSONDecodeError:
         return False
     return isinstance(p, dict) and p.get("tipo_resultado") == "ventas_diarias"
+
+
+def _tool_is_ventas_vs_meta(msg: ToolMessage) -> bool:
+    if getattr(msg, "name", None) == _VENTAS_VS_META_TOOL:
+        return True
+    raw = msg.content
+    if not isinstance(raw, str):
+        return False
+    try:
+        p = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(p, dict) and p.get("tipo_resultado") == "ventas_vs_meta"
 
 
 def _tool_is_depositos_listado(msg: ToolMessage) -> bool:
@@ -718,6 +774,72 @@ def _format_ventas_diarias_es(payload: dict[str, Any]) -> str:
     if trunc:
         out += f"\n\n*Se alcanzó el límite de filas; hay más días/sucursales en la base.*"
     return out
+
+
+def _format_ventas_vs_meta_es(payload: dict[str, Any]) -> str:
+    rows = payload.get("data") or []
+    if not isinstance(rows, list):
+        rows = []
+    vista = payload.get("tabla_o_vista", "")
+    user = payload.get("mysql_user", "")
+    y = int(payload.get("year", 0))
+    m = int(payload.get("month", 0))
+    mes_txt = _MESES_ES[m] if 1 <= m <= 12 else str(m)
+    modo = payload.get("modo", "")
+    bid = payload.get("branch_office_id")
+    sn = payload.get("sucursal_nombre")
+    intro = (
+        f"**Venta real vs meta (por día)** · `{vista}`"
+        f"{f' · usuario `{user}`' if user else ''}\n\n"
+        f"**Periodo:** {mes_txt} {y} · **Alcance:** {modo}"
+    )
+    if bid is not None:
+        intro += f" · **Sucursal:** {_md_cell(sn)} (id {bid})"
+    intro += (
+        "\n\n"
+        f"*Venta real:* {payload.get('criterio_venta_real', '')} · "
+        f"*Meta:* {payload.get('criterio_meta', '')}\n\n"
+    )
+    tv = payload.get("total_venta_real")
+    tm = payload.get("total_meta")
+    td = payload.get("total_diferencia")
+    tcp = payload.get("total_cumplimiento_pct")
+    intro += (
+        f"**Totales del mes:** venta real **{_md_cell(tv)}** · meta **{_md_cell(tm)}** · "
+        f"diferencia **{_md_cell(td)}**"
+    )
+    if tcp is not None:
+        intro += f" · cumplimiento **{_md_cell(tcp)} %**"
+    intro += "\n\n"
+
+    if not rows:
+        return intro + "No hay filas en el periodo."
+
+    headers = ["Fecha", "Venta real", "Meta", "Diferencia", "% cumpl."]
+    sep = "| " + " | ".join(["---"] * len(headers)) + " |"
+    head = "| " + " | ".join(headers) + " |"
+    lines = [intro, head, sep]
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        pct = r.get("cumplimiento_pct")
+        pct_s = "" if pct is None else _md_cell(pct)
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _md_cell(r.get("fecha")),
+                    _md_cell(r.get("venta_real")),
+                    _md_cell(r.get("meta")),
+                    _md_cell(r.get("diferencia")),
+                    pct_s,
+                ]
+            )
+            + " |"
+        )
+    lines.append("")
+    lines.append(f"*Días en la tabla: {len(rows)} (calendario completo del mes).*")
+    return "\n".join(lines)
 
 
 def _format_depositos_listado_es(payload: dict[str, Any]) -> str:
@@ -1341,6 +1463,12 @@ async def after_tools(state: AgentState, config: RunnableConfig) -> AgentState:
     last = state["messages"][-1]
     if not isinstance(last, ToolMessage):
         return {}
+    tname = getattr(last, "name", None) or ""
+
+    if tname == _RAG_TOOL_NAME:
+        # Sin AIMessage aquí: route_after_tools envía a rag_synthesize (LLM sin tools) para redactar en prosa.
+        return {}
+
     try:
         payload = json.loads(last.content) if isinstance(last.content, str) else json.loads(str(last.content))
     except (json.JSONDecodeError, TypeError):
@@ -1348,28 +1476,34 @@ async def after_tools(state: AgentState, config: RunnableConfig) -> AgentState:
     if not isinstance(payload, dict):
         return {}
 
-    tname = getattr(last, "name", None) or ""
-
     def _err_ai(msg: str) -> dict[str, list[AIMessage]]:
         return {"messages": [AIMessage(content=f"**{tname or 'Consulta'}:** {msg}")]}
 
-    if payload.get("success") is False:
-        err = payload.get("error", "No se pudo completar la consulta.")
-        if tname == _INFORME_VENTAS_TOOL or (
-            _tool_is_ranking_sucursales(last)
+    def _known_mysql_tool_for_error() -> bool:
+        return (
+            tname == _INFORME_VENTAS_TOOL
+            or _tool_is_distribucion_sucursales(last)
+            or _tool_is_listar_sucursales(last)
+            or _tool_is_ranking_sucursales(last)
             or _tool_is_resumen_ejecutivo(last)
             or _tool_is_evolucion_temporal(last)
             or _tool_is_consultar_kpi(last)
             or _tool_is_ventas_diarias(last)
+            or _tool_is_ventas_vs_meta(last)
             or _tool_is_depositos_listado(last)
             or _tool_is_depositos_resumen(last)
             or _tool_is_abonados_listado(last)
             or _tool_is_abonados_resumen(last)
-        ):
-            return _err_ai(str(err))
-        return {}
+        )
 
-    if not payload.get("success"):
+    if payload.get("success") is not True:
+        err = payload.get("error")
+        if not err and payload.get("variables"):
+            err = "Faltan variables de entorno: " + ", ".join(str(x) for x in (payload.get("variables") or []))
+        if not err:
+            err = "No se pudo completar la consulta."
+        if _known_mysql_tool_for_error():
+            return _err_ai(str(err))
         return {}
 
     if _tool_is_distribucion_sucursales(last):
@@ -1390,6 +1524,8 @@ async def after_tools(state: AgentState, config: RunnableConfig) -> AgentState:
         return {"messages": [AIMessage(content=_format_consultar_kpi_es(payload))]}
     if _tool_is_ventas_diarias(last):
         return {"messages": [AIMessage(content=_format_ventas_diarias_es(payload))]}
+    if _tool_is_ventas_vs_meta(last):
+        return {"messages": [AIMessage(content=_format_ventas_vs_meta_es(payload))]}
     if _tool_is_depositos_listado(last):
         return {"messages": [AIMessage(content=_format_depositos_listado_es(payload))]}
     if _tool_is_depositos_resumen(last):
@@ -1401,15 +1537,68 @@ async def after_tools(state: AgentState, config: RunnableConfig) -> AgentState:
     return {}
 
 
-def route_after_tools(state: AgentState) -> Literal["model", "end"]:
-    """Si after_tools insertó un AIMessage de respuesta fija, terminar (no volver al LLM)."""
+def route_after_tools(state: AgentState) -> Literal["model", "end", "rag_synthesize"]:
+    """MySQL formateado → end; RAG → síntesis sin tools; si no, otra pasada al modelo."""
     msgs = state["messages"]
-    if len(msgs) < 2:
+    if not msgs:
         return "model"
-    last, prev = msgs[-1], msgs[-2]
-    if isinstance(last, AIMessage) and not (last.tool_calls or []) and isinstance(prev, ToolMessage):
-        return "end"
+    last = msgs[-1]
+    if isinstance(last, ToolMessage) and getattr(last, "name", None) == _RAG_TOOL_NAME:
+        return "rag_synthesize"
+    if len(msgs) >= 2:
+        prev = msgs[-2]
+        if isinstance(last, AIMessage) and not (last.tool_calls or []) and isinstance(prev, ToolMessage):
+            return "end"
     return "model"
+
+
+async def rag_synthesize(state: AgentState, config: RunnableConfig) -> AgentState:
+    """Una pasada de LLM sin herramientas: resume extractos RAG en prosa (evita bucles del modelo con tools)."""
+    msgs = state["messages"]
+    last = msgs[-1]
+    if not isinstance(last, ToolMessage) or getattr(last, "name", None) != _RAG_TOOL_NAME:
+        return {"messages": [AIMessage(content="No fue posible sintetizar la respuesta documental.")]}
+    raw = (last.content if isinstance(last.content, str) else str(last.content)).strip()
+    human_q = _last_human_content(msgs)
+    max_ctx = 16_000
+    if len(raw) > max_ctx:
+        raw = raw[:max_ctx] + "\n\n[... extractos truncados por tamaño ...]"
+
+    sys_txt = (
+        "Eres el asistente de JIS PARKING. Redacta la respuesta final para el usuario en español "
+        "(Chile o español neutro). No uses voseo rioplatense: evita «decime», «tenés», «querés», «mirá», "
+        "«hacé»; usa forma neutral o de cortesía («puede», «indique», «si necesita») o «tú» sin voseo.\n"
+        "Basa la respuesta ÚNICAMENTE en los extractos. No inventes artículos ni normas que no aparezcan. "
+        "Si no alcanza el texto, dilo con claridad. No menciones herramientas, Chroma ni «base vectorial». "
+        "Entre 2 y 5 párrafos breves salvo que basten unas pocas frases."
+    )
+
+    model_id = config.get("configurable", {}).get("model", settings.DEFAULT_MODEL)
+    try:
+        m = get_model(model_id)
+    except Exception:
+        return {"messages": [AIMessage(content=_format_rag_tool_output_for_user(raw))]}
+
+    try:
+        resp = await m.ainvoke(
+            [
+                SystemMessage(content=sys_txt),
+                HumanMessage(
+                    content=(
+                        f"Pregunta del usuario:\n{human_q}\n\n"
+                        f"Extractos del documento interno:\n\n{raw}\n\n"
+                        "Responde de forma directa al usuario."
+                    )
+                ),
+            ],
+            config,
+        )
+        text = (resp.content if isinstance(resp.content, str) else str(resp.content)).strip()
+        if not text:
+            text = _format_rag_tool_output_for_user(raw)
+        return {"messages": [AIMessage(content=text)]}
+    except Exception:
+        return {"messages": [AIMessage(content=_format_rag_tool_output_for_user(raw))]}
 
 
 def coerce_ollama_text_tool_calls(message: AIMessage) -> AIMessage:
@@ -1441,6 +1630,564 @@ def coerce_ollama_text_tool_calls(message: AIMessage) -> AIMessage:
     return message
 
 
+# Heurísticas locales: modelos pequeños (Ollama) a veces eligen jis_resumen_depositos ante preguntas de maestro sucursales.
+_DEPOSITO_LEX = re.compile(
+    r"dep[oó]sitos?|recaudaci[oó]n|recaudado|depositad|movimientos?\s+de\s+recaud|"
+    r"lista\s+de\s+dep[oó]sitos|kpi\s+de\s+dep[oó]sitos|"
+    r"estado\s+depositado|depositado\s+con\s+diferencia|depositados?\s+correctos?|"
+    r"depositado\s+a\s+favor|pendientes\s+de\s+\w+\s+\d{4}.*dep|dep[oó]sitos\s+pendientes|"
+    r"resumen\s+de\s+dep[oó]sitos|mismo\s+resumen\s+de\s+dep[oó]sitos|incluyendo\s+sucursales\s+tipo\s+oficina",
+    re.I,
+)
+
+_SUCURSALES_CATALOGO_LEX = re.compile(
+    r"cu[aá]ntas?\s+sucursales|cu[aá]ntos\s+sucursales|"
+    r"lista\s+.{0,40}sucursales|lista\s+las\s+sucursales|"
+    r"^lista\s+todas\s+las\s+sucursales|"
+    r"sucursales\s+activas|sucursales\s+del\s+responsable|"
+    r"locales\s+cuyo\s+nombre|sucursales\s+tottus|tottus\s+en\s+san|"
+    r"busca\s+sucursales|sucursales\s+en\s+zona|sucursales\s+en\s+la\s+comuna|"
+    r"locales\s+de\s+segmento|sucursales\s+de\s+segmento|"
+    r"marca\s+.{0,24}en\s+comuna|sucursales\s+en\s+calle|"
+    r"datos\s+de\s+la\s+sucursal|c[oó]digo\s+dte|supervisor.*rut|"
+    r"visibilidad\s+legacy|inactivas\s+asignadas|"
+    r"sucursales\s+hay\s+en\s+la\s+regi|regi[oó]n\s+metropolitana|"
+    r"comuna\s+de\s+providencia|comuna\s+santiago",
+    re.I,
+)
+
+_DISTRIBUCION_LEX = re.compile(
+    r"(porcentaje|qu[eé]\s*%).{0,50}sucursales|"
+    r"distribuci[oó]n\s+de\s+sucursales|"
+    r"cu[aá]ntas\s+y\s+qu[eé]\s+%|"
+    r"desglose\s+por\s+comuna.{0,70}porcentaje|"
+    r"c[oó]mo\s+se\s+distribuyen\s+las\s+sucursales",
+    re.I,
+)
+
+
+def _last_human_content(messages: list[Any]) -> str:
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage):
+            c = msg.content
+            return c if isinstance(c, str) else str(c)
+    return ""
+
+
+_RAG_TOOL_NAME = "jis_buscar_conocimiento_jisparking"
+
+
+def _rag_tool_ran_after_last_human(messages: list[Any]) -> bool:
+    """Evita reinyectar la tool RAG: el último Human sigue siendo el mismo tras ToolMessage."""
+    last_h = None
+    for i in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[i], HumanMessage):
+            last_h = i
+            break
+    if last_h is None:
+        return False
+    for m in messages[last_h + 1 :]:
+        if isinstance(m, ToolMessage) and getattr(m, "name", None) == _RAG_TOOL_NAME:
+            return True
+    return False
+
+
+def _format_rag_tool_output_for_user(raw: str) -> str:
+    body = (raw or "").strip()
+    if len(body) > 14_000:
+        body = body[:14_000] + "\n\n*(Contenido truncado para la interfaz.)*"
+    return f"**Según la documentación indexada (JIS PARKING):**\n\n{body}"
+
+
+def _tool_call_dict(tc: Any) -> dict[str, Any]:
+    if isinstance(tc, dict):
+        name = tc.get("name")
+        args = tc.get("args") or {}
+        if isinstance(args, str):
+            try:
+                args = json.loads(args) if args.strip() else {}
+            except json.JSONDecodeError:
+                args = {}
+        tid = tc.get("id") or f"call_{uuid.uuid4().hex[:16]}"
+        return {"name": name, "args": dict(args) if isinstance(args, dict) else {}, "id": tid, "type": "tool_call"}
+    name = getattr(tc, "name", None)
+    args = getattr(tc, "args", None) or {}
+    if isinstance(args, str):
+        try:
+            args = json.loads(args) if args.strip() else {}
+        except json.JSONDecodeError:
+            args = {}
+    tid = getattr(tc, "id", None) or f"call_{uuid.uuid4().hex[:16]}"
+    return {"name": name, "args": dict(args) if isinstance(args, dict) else {}, "id": tid, "type": "tool_call"}
+
+
+def _dimension_distribucion_from_text(human: str) -> str:
+    hl = human.lower()
+    if "segmento" in hl:
+        return "segmento"
+    if re.search(r"\bzona\b", hl):
+        return "zona"
+    if "región" in human or "region" in hl:
+        return "region"
+    if "comuna" in hl:
+        return "comuna"
+    if "marca" in hl or "principal" in hl:
+        return "marca"
+    return "segmento"
+
+
+def _listar_sucursales_args_from_text(human: str) -> dict[str, Any]:
+    h = human
+    out: dict[str, Any] = {}
+    if re.search(r"cu[aá]ntas?|cu[aá]ntos|hay en total|n[uú]mero de", h, re.I):
+        out["modo_respuesta"] = "contar"
+    if re.search(r"providencia", h, re.I):
+        out["comuna_contiene"] = "Providencia"
+    if re.search(r"metropolitana", h, re.I):
+        out["region_contiene"] = "Metropolitana"
+    if re.search(r"comuna\s+santiago|sucursales\s+de\s+la\s+comuna\s+santiago", h, re.I):
+        out["comuna_contiene"] = "Santiago"
+    if re.search(r"david\s+g[oó]mez", h, re.I):
+        out["responsable_contiene"] = "David Gómez"
+    if re.search(r"lider\s+tobalaba", h, re.I):
+        out["sucursal_contiene"] = "Lider Tobalaba"
+    if re.search(r"tottus", h, re.I) and re.search(r"san\s+bernardo", h, re.I):
+        out["marca_contiene"] = "Tottus"
+        out["comuna_contiene"] = "San Bernardo"
+    if re.search(r"sta\s+isabel|santa\s+isabel", h, re.I):
+        out["local_marca_o_comuna_contiene"] = "Sta Isabel"
+    if re.search(r"zona\s+centro", h, re.I):
+        out["zona_contiene"] = "Centro"
+    if re.search(r"segmento\s+supermercado", h, re.I):
+        out["segmento_contiene"] = "SUPERMERCADO"
+    if re.search(r"segmento\s+mall", h, re.I):
+        out["segmento_contiene"] = "MALL"
+    if re.search(r"marca\s+lider", h, re.I) and re.search(r"lo prado", h, re.I):
+        out["marca_contiene"] = "LIDER"
+        out["comuna_contiene"] = "Lo Prado"
+    if re.search(r"matucana", h, re.I):
+        out["direccion_contiene"] = "Matucana"
+    if re.search(r"\bid\s+42\b|con id 42", h, re.I):
+        out["branch_office_id"] = 42
+    if re.search(r"76160", h, re.I):
+        out["codigo_dte_contiene"] = "76160"
+    if re.search(r"visibilidad\s+legacy|entran\s+en\s+reportes", h, re.I):
+        out["solo_visibilidad_reporte"] = True
+    if re.search(r"inactivas", h, re.I):
+        out["solo_activas"] = False
+    return out
+
+
+def _merge_listar_sucursales_args_from_human(model_args: dict[str, Any], human: str) -> dict[str, Any]:
+    """Completa argumentos que el LLM omitió pero que el texto del usuario deja claro (p. ej. región)."""
+    merged = dict(model_args or {})
+    inferred = _listar_sucursales_args_from_text(human)
+    for k, v in inferred.items():
+        cur = merged.get(k)
+        if cur is None or cur == "":
+            merged[k] = v
+    return merged
+
+
+_KPI_VISTA_PHRASE = re.compile(
+    r"vista\s+mensual.*?del\s+kpi|vista\s+acumulad[oa].*?del\s+kpi|"
+    r"filas\s+de\s+kpi|kpi\s+de\s+ingresos\s+mensual",
+    re.I,
+)
+_KPI_ACUMULADO_HASTA_PHRASE = re.compile(r"kpi\s+acumulado\s+hasta", re.I)
+
+_VENTAS_DIARIAS_PHRASE = re.compile(
+    r"d[ií]a\s+a\s+d[ií]a|desglose\s+diario|ventas\s+diarias|"
+    r"presupuesto\s+d[ií]a\s+a\s+d[ií]a|evoluci[oó]n\s+diaria\s+de\s+la\s+meta|"
+    r"del\s+\d+\s+al\s+\d+\s+de\s+\w+\s+\d{4}|\d{4}-\d{2}-\d{2}\s+al\s+\d{4}-\d{2}-\d{2}",
+    re.I,
+)
+
+_EVOLUCION_VENTAS_PHRASE = re.compile(
+    r"evoluci[oó]n\s+mes\s+a\s+mes|primer\s+semestre|segundo\s+semestre|"
+    r"ventas\s+por\s+mes\s+del\s+local",
+    re.I,
+)
+
+_ABONADOS_LEX = re.compile(
+    r"abonado|dtes?\b|documentos?\s+abonados|imputada\s+por\s+pagar|kpi\s+pendientes\s+dte",
+    re.I,
+)
+
+_INFORME_VENTAS_PHRASE = re.compile(
+    r"informe\s+gerencial|informe\s+por\s+sucursal|resumen\s+general\s+de\s+ventas|resumen\s+de\s+ventas|resumen\s+total\s+de\s+ventas|"
+    r"tabla\s+de\s+ventas|ventas\s+por\s+responsable|desglose\s+por\s+responsable|"
+    r"comparaci[oó]n\s+al\s+a[nñ]o\s+anterior|variaci[oó]n|desviaci[oó]n\s+vs|cumplimiento\s+vs\s+meta|"
+    r"ingresos\s+vs|presupuesto.*ticket|ventas\s+ytd|\bytd\b|"
+    r"acumulado\s+de\s+enero|mismo\s+periodo|mismo\s+acumulado",
+    re.I,
+)
+# Ollama a veces no emite tool_calls; forzamos RAG si el usuario pide documentación interna curada.
+_RAG_DOC_LEX = re.compile(
+    r"reglamento\s+interno|"
+    r"según\s+el\s+reglamento|segun\s+el\s+reglamento|"
+    r"reglamento\s+de\s+jis|"
+    r"documentaci[oó]n\s+interna|documentaci[oó]n\s+indexada|"
+    r"base\s+de\s+conocimiento|"
+    r"manual\s+interno|pol[ií]ticas?\s+internas?|"
+    r"orden,?\s*higiene\s+y\s+seguridad|"
+    r"elementos\s+de\s+protecci[oó]n\s+personal|\bepp\b|"
+    # Protocolos y formularios SC (CEREBRO_JIS → jisparking_knowledge)
+    r"\bprot-sc-001\b|prot\s*-\s*sc\s*-\s*001|"
+    r"protocolo[s]?\s+de\s+atenci[oó]n|atenci[oó]n\s+(al\s+)?cliente[s]?|"
+    r"personal\s+en\s+patio|\ben\s+patio\b|inicio\s+de\s+jornada|"
+    r"centro\s+de\s+pago|cajero\s+autom[aá]tico|"
+    r"p[eé]rdida\s+de\s+ticket|ticket\s+perdid[oa]|"
+    r"\bsiniestro\b|c[aá]maras?\s+de\s+(vigilancia|seguridad)|"
+    r"form-sc-001|form-sc-002|formulario\s+de\s+(p[eé]rdida|siniestro)",
+    re.I,
+)
+_RAG_SKIP_LEX = re.compile(
+    r"cu[aá]ntas?\s+sucursales|cu[aá]nto\s+(ganamos|vendimos|ingres[oó])|ranking\s+de\s+sucursales|"
+    r"ventas\s+de\s+(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)|"
+    r"dep[oó]sitos?\s+de|abonados?\s+de|kpi\s+de\s+ingresos",
+    re.I,
+)
+_VENTAS_VS_DASHBOARD_PHRASE = re.compile(
+    r"venta\s+vs\s+meta|real\s+vs\s+presupuesto|presupuesto\s+diario|"
+    r"por\s+d[ií]a|cada\s+d[ií]a|d[ií]a\s+a\s+d[ií]a",
+    re.I,
+)
+_MES_INFORME_MAP: dict[str, int] = {
+    "enero": 1,
+    "febrero": 2,
+    "marzo": 3,
+    "abril": 4,
+    "mayo": 5,
+    "junio": 6,
+    "julio": 7,
+    "agosto": 8,
+    "septiembre": 9,
+    "octubre": 10,
+    "noviembre": 11,
+    "diciembre": 12,
+}
+
+
+def _ultimo_mes_anio_informe(human: str) -> tuple[int, int] | None:
+    pat = re.compile(
+        r"\b(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)\s+(\d{4})\b",
+        re.I,
+    )
+    ms = list(pat.finditer(human))
+    if not ms:
+        return None
+    g1, g2 = ms[-1].group(1).lower(), ms[-1].group(2)
+    mo = _MES_INFORME_MAP.get(g1)
+    if not mo:
+        return None
+    return int(g2), mo
+
+
+def _informe_ventas_args_from_human(human: str, year: int, month: int) -> dict[str, Any]:
+    args: dict[str, Any] = {"year": year, "month": month, "tipo_periodo": "mensual"}
+    if re.search(
+        r"\bytd\b|acumulado\s+de\s+enero|ene\.?\s*[–-]\s*\w+\s+\d{4}|mismo\s+periodo|mismo\s+acumulado",
+        human,
+        re.I,
+    ):
+        args["alcance_temporal"] = "ytd"
+    else:
+        args["alcance_temporal"] = "mes"
+    if re.search(r"resumen\s+general", human, re.I) and not re.search(
+        r"por\s+sucursal|por\s+responsable|tabla\s+de\s+ventas|parking|informe\s+por\s+sucursal",
+        human,
+        re.I,
+    ):
+        args["agrupacion"] = "total"
+    elif re.search(
+        r"por\s+responsable|responsable\s+comercial|ventas\s+por\s+responsable|desglose\s+por\s+responsable",
+        human,
+        re.I,
+    ):
+        args["agrupacion"] = "responsable"
+    elif re.search(
+        r"por\s+sucursal|informe\s+gerencial|tabla\s+de\s+ventas|parking|informe\s+por\s+sucursal",
+        human,
+        re.I,
+    ):
+        args["agrupacion"] = "sucursal"
+    else:
+        args["agrupacion"] = "total"
+    if re.search(r"g[oó]mez", human, re.I) and re.search(r"responsable|locales\s+del", human, re.I):
+        args["responsable_contiene"] = "Gómez"
+    if re.search(r"p[eé]rez", human, re.I) and re.search(r"responsable|locales\s+del", human, re.I):
+        args["responsable_contiene"] = "Pérez"
+    m_sid = re.search(r"sucursal\s+id\s+(\d+)", human, re.I)
+    if m_sid:
+        args["branch_office_id"] = int(m_sid.group(1))
+    return args
+
+
+def _ventas_diarias_args_from_human(human: str) -> dict[str, Any] | None:
+    hl = human.lower()
+    args: dict[str, Any] = {"metrica": "ingresos"}
+    if re.search(r"ppto|presupuesto|meta\s*\(ppto\)|evoluci[oó]n\s+diaria\s+de\s+la\s+meta", hl, re.I):
+        args["metrica"] = "ppto"
+    m = re.search(r"(\d{4}-\d{2}-\d{2})\s+al\s+(\d{4}-\d{2}-\d{2})", human)
+    if m:
+        args["fecha_desde"] = m.group(1)
+        args["fecha_hasta"] = m.group(2)
+    else:
+        mr = re.search(
+            r"(\d{1,2})\s+al\s+(\d{1,2})\s+de\s+(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)\s+(\d{4})",
+            hl,
+            re.I,
+        )
+        if mr:
+            d_a, d_b = int(mr.group(1)), int(mr.group(2))
+            mn, yr = mr.group(3).lower(), int(mr.group(4))
+            mo = _MES_INFORME_MAP.get(mn)
+            if not mo:
+                return None
+            args["fecha_desde"] = f"{yr}-{mo:02d}-{d_a:02d}"
+            args["fecha_hasta"] = f"{yr}-{mo:02d}-{d_b:02d}"
+        else:
+            mr2 = re.search(
+                r"(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)\s+(\d{4})",
+                hl,
+                re.I,
+            )
+            if mr2 and args["metrica"] == "ppto":
+                mn, yr = mr2.group(1).lower(), int(mr2.group(2))
+                mo = _MES_INFORME_MAP.get(mn)
+                if not mo:
+                    return None
+                last = monthrange(yr, mo)[1]
+                args["fecha_desde"] = f"{yr}-{mo:02d}-01"
+                args["fecha_hasta"] = f"{yr}-{mo:02d}-{last:02d}"
+            else:
+                return None
+    if re.search(r"sucursal\s+id\s+(\d+)", human, re.I):
+        args["branch_office_id"] = int(re.search(r"sucursal\s+id\s+(\d+)", human, re.I).group(1))
+    elif re.search(r"se\s+llama\s+(\w+)", hl, re.I):
+        args["sucursal_contiene"] = re.search(r"se\s+llama\s+(\w+)", hl, re.I).group(1).title()
+    elif re.search(r"contenga\s+(\w+)\s+en\s+el\s+nombre", hl, re.I):
+        args["sucursal_contiene"] = re.search(r"contenga\s+(\w+)\s+en\s+el\s+nombre", hl, re.I).group(1).title()
+    elif re.search(r"local\s+que\s+contenga\s+(\w+)", hl, re.I):
+        args["sucursal_contiene"] = re.search(r"local\s+que\s+contenga\s+(\w+)", hl, re.I).group(1).title()
+    return args
+
+
+def _evolucion_args_from_human(human: str) -> dict[str, Any] | None:
+    y_match = re.search(r"\b(20\d{2})\b", human)
+    if not y_match:
+        return None
+    year = int(y_match.group(1))
+    args: dict[str, Any] = {"year": year, "mes_desde": 1, "mes_hasta": 12}
+    if re.search(r"primer\s+semestre", human, re.I):
+        args["semestre"] = 1
+    elif re.search(r"segundo\s+semestre", human, re.I):
+        args["semestre"] = 2
+    m_sid = re.search(r"sucursal\s+id\s+(\d+)", human, re.I)
+    if m_sid:
+        args["branch_office_id"] = int(m_sid.group(1))
+    else:
+        ms = re.search(r"para\s+la\s+sucursal\s+([A-Za-z0-9áéíóúÁÉÍÓÚñÑ]+)", human, re.I)
+        if ms:
+            args["sucursal_contiene"] = ms.group(1).title()
+        else:
+            mc = re.search(r"contenga\s+(\w+)\s+en\s+el\s+nombre", human, re.I)
+            if mc:
+                args["sucursal_contiene"] = mc.group(1).title()
+    return args
+
+
+def _guard_tool_calls_for_small_models(messages: list[Any], response: AIMessage) -> AIMessage:
+    """Corrige tool_calls absurdas frecuentes en LLMs locales sin re-ejecutar el modelo."""
+    if not response.tool_calls:
+        return response
+    human = _last_human_content(messages)
+    if not human.strip():
+        return response
+
+    tc0 = _tool_call_dict(response.tool_calls[0])
+    name = tc0.get("name") or ""
+
+    if name in ("jis_resumen_depositos", "jis_consultar_depositos") and _SUCURSALES_CATALOGO_LEX.search(
+        human
+    ):
+        if _DEPOSITO_LEX.search(human):
+            return response
+        args = _listar_sucursales_args_from_text(human)
+        fixed = {**tc0, "name": "jis_listar_sucursales", "args": args}
+        return AIMessage(
+            content="",
+            tool_calls=[fixed],
+            id=response.id,
+            response_metadata=response.response_metadata,
+        )
+
+    if name == "jis_listar_sucursales" and re.search(
+        r"informe\s+por\s+sucursal|informe\s+gerencial\s+de\s+ventas", human, re.I
+    ):
+        ym = _ultimo_mes_anio_informe(human)
+        if ym:
+            y, mo = ym
+            iargs = _informe_ventas_args_from_human(human, y, mo)
+            fixed = {**tc0, "name": _INFORME_VENTAS_TOOL, "args": iargs}
+            return AIMessage(
+                content="",
+                tool_calls=[fixed],
+                id=response.id,
+                response_metadata=response.response_metadata,
+            )
+
+    if name == "jis_obtener_resumen_ejecutivo" and _KPI_ACUMULADO_HASTA_PHRASE.search(human):
+        ym = _ultimo_mes_anio_informe(human)
+        m_sid = re.search(r"sucursal\s+id\s+(\d+)", human, re.I)
+        if ym:
+            y, mo = ym
+            kargs: dict[str, Any] = {"tipo_vista": "acumulado", "year": y, "month": mo}
+            if m_sid:
+                kargs["branch_office_id"] = int(m_sid.group(1))
+            fixed = {**tc0, "name": "jis_consultar_kpi_ingresos", "args": kargs}
+            return AIMessage(
+                content="",
+                tool_calls=[fixed],
+                id=response.id,
+                response_metadata=response.response_metadata,
+            )
+
+    if _DISTRIBUCION_LEX.search(human) and not _DEPOSITO_LEX.search(human):
+        if name in (
+            "jis_listar_sucursales",
+            "jis_resumen_depositos",
+            "jis_consultar_depositos",
+            "jis_ranking_sucursales",
+        ):
+            dim = _dimension_distribucion_from_text(human)
+            fixed = {**tc0, "name": "jis_distribucion_sucursales", "args": {"dimension": dim}}
+            return AIMessage(
+                content="",
+                tool_calls=[fixed],
+                id=response.id,
+                response_metadata=response.response_metadata,
+            )
+
+    if (
+        name == "jis_resumen_abonados"
+        and re.search(r"mismo\s+resumen", human, re.I)
+        and not _ABONADOS_LEX.search(human)
+    ):
+        m_sid = re.search(r"sucursal\s+id\s+(\d+)", human, re.I)
+        ym = _ultimo_mes_anio_informe(human)
+        y, mo = ym if ym else (2026, 3)
+        rex: dict[str, Any] = {"year": y, "month": mo, "tipo_periodo": "mensual"}
+        if m_sid:
+            rex["branch_office_id"] = int(m_sid.group(1))
+        fixed = {**tc0, "name": "jis_obtener_resumen_ejecutivo", "args": rex}
+        return AIMessage(
+            content="",
+            tool_calls=[fixed],
+            id=response.id,
+            response_metadata=response.response_metadata,
+        )
+
+    if name in ("jis_consultar_abonados", "jis_resumen_abonados") and _ABONADOS_LEX.search(human):
+        args = dict(tc0.get("args") or {})
+        ym = _ultimo_mes_anio_informe(human)
+        if ym:
+            y, mo = ym
+            if not args.get("year"):
+                args["year"] = y
+            if not args.get("month"):
+                args["month"] = mo
+        m_iso = re.search(r"(\d{4}-\d{2}-\d{2})\s+al\s+(\d{4}-\d{2}-\d{2})", human)
+        if m_iso and name == "jis_consultar_abonados":
+            if not args.get("fecha_documento_desde"):
+                args["fecha_documento_desde"] = m_iso.group(1)
+            if not args.get("fecha_documento_hasta"):
+                args["fecha_documento_hasta"] = m_iso.group(2)
+        if name == "jis_consultar_abonados":
+            mc = re.search(r"contenga\s+(\w+)\s+en\s+el\s+nombre", human, re.I)
+            if mc and not args.get("sucursal_contiene") and not args.get("branch_office_id"):
+                args["sucursal_contiene"] = mc.group(1).title()
+            if re.search(r"imputada\s+por\s+pagar", human, re.I):
+                args["imputada_por_pagar"] = True
+            if re.search(r"status_id\s*[=:]?\s*4", human, re.I):
+                args["status_id"] = 4
+        if re.search(r"rut\s+que\s+contenga\s+(\d+)", human, re.I) and name == "jis_consultar_abonados":
+            args["rut_contiene"] = re.search(r"rut\s+que\s+contenga\s+(\d+)", human, re.I).group(1)
+        fixed = {**tc0, "args": args}
+        return AIMessage(
+            content="",
+            tool_calls=[fixed],
+            id=response.id,
+            response_metadata=response.response_metadata,
+        )
+
+    if name == "jis_consultar_ventas_vs_meta":
+        if _VENTAS_DIARIAS_PHRASE.search(human) and not re.search(
+            r"cumplimiento\s+vs\s+meta\s+por\s+d[ií]a", human, re.I
+        ):
+            vd = _ventas_diarias_args_from_human(human)
+            if vd and vd.get("fecha_desde") and vd.get("fecha_hasta"):
+                fixed = {**tc0, "name": "jis_consultar_ventas_diarias", "args": vd}
+                return AIMessage(
+                    content="",
+                    tool_calls=[fixed],
+                    id=response.id,
+                    response_metadata=response.response_metadata,
+                )
+        if _EVOLUCION_VENTAS_PHRASE.search(human):
+            ev = _evolucion_args_from_human(human)
+            if ev and (ev.get("branch_office_id") is not None or ev.get("sucursal_contiene")):
+                fixed = {**tc0, "name": "jis_obtener_evolucion_temporal", "args": ev}
+                return AIMessage(
+                    content="",
+                    tool_calls=[fixed],
+                    id=response.id,
+                    response_metadata=response.response_metadata,
+                )
+        if _KPI_VISTA_PHRASE.search(human):
+            ym = _ultimo_mes_anio_informe(human)
+            if ym:
+                y, mo = ym
+                tipo_v = "acumulado" if re.search(r"acumulad[oa]", human, re.I) else "mensual"
+                fixed = {
+                    **tc0,
+                    "name": "jis_consultar_kpi_ingresos",
+                    "args": {"tipo_vista": tipo_v, "year": y, "month": mo},
+                }
+                return AIMessage(
+                    content="",
+                    tool_calls=[fixed],
+                    id=response.id,
+                    response_metadata=response.response_metadata,
+                )
+        if _INFORME_VENTAS_PHRASE.search(human) and not _VENTAS_VS_DASHBOARD_PHRASE.search(human):
+            ym = _ultimo_mes_anio_informe(human)
+            if ym:
+                y, mo = ym
+                iargs = _informe_ventas_args_from_human(human, y, mo)
+                fixed = {**tc0, "name": _INFORME_VENTAS_TOOL, "args": iargs}
+                return AIMessage(
+                    content="",
+                    tool_calls=[fixed],
+                    id=response.id,
+                    response_metadata=response.response_metadata,
+                )
+
+    if name == "jis_listar_sucursales":
+        prev_args = dict(tc0.get("args") or {})
+        merged = _merge_listar_sucursales_args_from_human(prev_args, human)
+        if merged != prev_args:
+            return AIMessage(
+                content="",
+                tool_calls=[{**tc0, "args": merged}],
+                id=response.id,
+                response_metadata=response.response_metadata,
+            )
+
+    return response
+
+
 def wrap_model(model: BaseChatModel) -> RunnableSerializable[AgentState, AIMessage]:
     bound_model = model.bind_tools(tools)
     preprocessor = RunnableLambda(
@@ -1462,6 +2209,47 @@ async def acall_model(state: AgentState, config: RunnableConfig) -> AgentState:
     model_runnable = wrap_model(m)
     response = await model_runnable.ainvoke(state, config)
     response = coerce_ollama_text_tool_calls(response)
+    human_last = _last_human_content(state["messages"])
+    if not response.tool_calls and re.search(r"informe\s+por\s+sucursal", human_last, re.I):
+        ym = _ultimo_mes_anio_informe(human_last)
+        if ym:
+            y, mo = ym
+            iargs = _informe_ventas_args_from_human(human_last, y, mo)
+            tc_fix = _tool_call_dict(
+                {
+                    "name": _INFORME_VENTAS_TOOL,
+                    "args": iargs,
+                    "id": f"call_{uuid.uuid4().hex[:16]}",
+                    "type": "tool_call",
+                }
+            )
+            response = AIMessage(
+                content="",
+                tool_calls=[tc_fix],
+                id=response.id,
+                response_metadata=response.response_metadata,
+            )
+    if (
+        not response.tool_calls
+        and _RAG_DOC_LEX.search(human_last)
+        and not _RAG_SKIP_LEX.search(human_last)
+        and not _rag_tool_ran_after_last_human(state["messages"])
+    ):
+        tc_rag = _tool_call_dict(
+            {
+                "name": _RAG_TOOL_NAME,
+                "args": {"consulta": human_last.strip()[:4000]},
+                "id": f"call_{uuid.uuid4().hex[:16]}",
+                "type": "tool_call",
+            }
+        )
+        response = AIMessage(
+            content="",
+            tool_calls=[tc_rag],
+            id=response.id,
+            response_metadata=response.response_metadata,
+        )
+    response = _guard_tool_calls_for_small_models(state["messages"], response)
 
     if state["remaining_steps"] < 2 and response.tool_calls:
         return {
@@ -1490,6 +2278,7 @@ agent = StateGraph(AgentState)
 agent.add_node("model", acall_model)
 agent.add_node("tools", ToolNode(tools))
 agent.add_node("after_tools", after_tools)
+agent.add_node("rag_synthesize", rag_synthesize)
 agent.add_node("guard_input", safeguard_input)
 agent.add_node("block_unsafe_content", block_unsafe_content)
 agent.set_entry_point("guard_input")
@@ -1512,8 +2301,9 @@ agent.add_edge("tools", "after_tools")
 agent.add_conditional_edges(
     "after_tools",
     route_after_tools,
-    {"model": "model", "end": END},
+    {"model": "model", "end": END, "rag_synthesize": "rag_synthesize"},
 )
+agent.add_edge("rag_synthesize", END)
 
 
 def pending_tool_calls(state: AgentState) -> Literal["tools", "done"]:

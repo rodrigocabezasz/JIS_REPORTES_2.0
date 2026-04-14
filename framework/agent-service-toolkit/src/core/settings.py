@@ -91,6 +91,11 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str | None = None
     # Baja = más fiel a datos de herramientas (recomendado para JIS / SQL)
     OLLAMA_TEMPERATURE: float = Field(default=0.1, ge=0.0, le=2.0)
+    # RAG JIS PARKING: embeddings locales (debe existir en Ollama: `ollama pull <modelo>`)
+    OLLAMA_EMBED_MODEL: str = "nomic-embed-text"
+    # Ruta del índice Chroma (relativa a la raíz del toolkit si no es absoluta)
+    JIS_RAG_CHROMA_PATH: str = "chroma_jisparking"
+    JIS_RAG_TOP_K: int = Field(default=5, ge=1, le=20)
     USE_FAKE_MODEL: bool = False
     OPENROUTER_API_KEY: str | None = None
 

@@ -84,6 +84,46 @@ Documento vivo para alinear sesiones de desarrollo: qué ya está hecho, qué fa
 | Informe ventas en Streamlit (tabla con formato moneda) | `framework/agent-service-toolkit/src/streamlit_jis_informe_ventas.py` |
 | Scripts arranque Windows | `scripts/*.ps1` |
 | Frases de prueba / demos (chat) | `docs/PREGUNTAS_CHATBOT_REVISADAS.md` |
+| RAG JIS (Chroma + embeddings Ollama + tool + síntesis) | `framework/agent-service-toolkit/src/agents/jis_rag_tools.py`, `jis_reports_agent.py` (nodos `rag_synthesize`, heurísticas `_RAG_*`) |
+| Ingesta índice vectorial | `framework/agent-service-toolkit/scripts/build_jisparking_rag.py`, `scripts/run_build_jisparking_rag.ps1` |
+| OCR opcional imagen → `.txt` corpus | `framework/agent-service-toolkit/scripts/image_to_jisparking_knowledge.py` (grupo `rag_ocr` en `pyproject.toml`) |
+| Corpus documental (Markdown/PDF) | `framework/agent-service-toolkit/data/jisparking_knowledge/` |
+
+---
+
+## Avances — sesión 2026-04-13 (RAG conocimiento JIS + protocolos)
+
+### Objetivo de producto
+
+- Complementar MySQL con **conocimiento documental** (reglamento interno, **PROT-SC-001**, formularios **FORM-SC-001** / **FORM-SC-002**) para preguntas conceptuales o procedimentales sin cifras de BD.
+
+### Implementación técnica (toolkit)
+
+- **`jis_rag_tools.py`:** tool **`jis_buscar_conocimiento_jisparking`** — Chroma persistente (`JIS_RAG_CHROMA_PATH`, por defecto `chroma_jisparking/` junto al toolkit), **`OllamaEmbeddings`** con `OLLAMA_EMBED_MODEL` (default `nomic-embed-text`) y mismo **`OLLAMA_BASE_URL`** que el chat.
+- **`settings.py`:** `OLLAMA_EMBED_MODEL`, `JIS_RAG_CHROMA_PATH`, `JIS_RAG_TOP_K`.
+- **`build_jisparking_rag.py`:** ingesta `.md`, `.txt`, `.pdf`, `.docx`; `load_dotenv` opcional; **preflight** `embed_query("ping")` **antes** de borrar Chroma; nota sobre imágenes → OCR.
+- **`run_build_jisparking_rag.ps1`:** crea/uso de `.venv` en el toolkit, `pip install -e .`, ejecuta el build (mensaje de requisitos Ollama).
+- **`smoke_test_jisparking_rag.py`:** prueba rápida del índice sin cargar `Settings` del servicio completo.
+- **`agents.py`:** descripción de **`jis-reports`** ampliada (MySQL + RAG documental).
+
+### Grafo `jis_reports_agent` (Ollama + anti-bucle RAG)
+
+- **Inyección heurística** cuando el modelo no emite `tool_calls`: patrón **`_RAG_DOC_LEX`** (reglamento, documentación indexada, **PROT-SC-001**, protocolo de atención, patio / inicio de jornada, centro de pago, cajero, pérdida de ticket, siniestro, cámaras, formularios SC, etc.); **`_RAG_SKIP_LEX`** evita mezclar con intenciones típicas SQL.
+- **`_rag_tool_ran_after_last_human`:** evita **re-inyectar** la misma tool RAG en cada pasada al modelo (causa de bucles repetidos en Streamlit).
+- **`after_tools`:** para la tool RAG **no** devuelve markdown crudo hacia `END` directo: **`route_after_tools`** deriva a nodo **`rag_synthesize`**.
+- **`rag_synthesize`:** segunda pasada **LLM sin `bind_tools`** — resume extractos en prosa (español Chile/neutro, sin voseo rioplatense en el system prompt); fallback a extractos con encabezado si falla el modelo.
+- **Instrucciones del agente:** reglas RAG vs SQL; anti-negación si ya hay fragmentos; ajuste de redacción interna del prompt (menos voseo en imperativos hacia el modelo).
+
+### Documentación y datos en repo
+
+- **`docs/PREGUNTAS_CHATBOT_REVISADAS.md`:** bloque **Streamlit local** (API + `AGENT_URL`, agente `jis-reports`); sección **§8** ampliada (reglamento, protocolos, formularios, cruces); checklist con filas RAG; nota de palabras clave que disparan RAG sin decir «reglamento».
+- **`.env.example` del toolkit:** variables RAG / embeddings comentadas.
+- **Corpus:** reglamento PDF + `servicio_cliente_protocolos_atencion.md`, `servicio_cliente_formulario_perdida_ticket.md`, `servicio_cliente_formulario_siniestro.md` (sincronizados desde CEREBRO_JIS hacia `data/jisparking_knowledge/`); índice de referencia **268 chunks** tras último build documentado por el equipo.
+
+### Criterios de “hecho” ampliados (esta sesión)
+
+- [x] RAG consultable desde Streamlit con **una** invocación de tool y respuesta **sintetizada** (sin bucles).
+- [x] Preguntas operativas de protocolo (**patio**, **inicio de jornada**) cubiertas por heurística si el LLM no llama la tool.
 
 ---
 
@@ -105,6 +145,7 @@ Documento vivo para alinear sesiones de desarrollo: qué ya está hecho, qué fa
 - [ ] Respuesta en español; números y nombres coinciden con el JSON de la tool.
 - [ ] Sin bucles de invocación de la misma tool en un solo turno (Ollama).
 - [ ] Comportamiento definido para **listar** vs **contar** cuando el usuario lo pide explícitamente.
+- [ ] Preguntas RAG típicas (reglamento, protocolos SC) responden con **base en documentos indexados**, sin negar acceso si el índice existe.
 
 ---
 
@@ -112,6 +153,7 @@ Documento vivo para alinear sesiones de desarrollo: qué ya está hecho, qué fa
 
 - Rotar credenciales si en algún momento se compartieron `.env` en chat o capturas.
 - Tras cambios en Python del toolkit, **reiniciar** el servicio FastAPI del agente (y Streamlit) para cargar código nuevo.
+- Tras agregar o editar archivos en **`data/jisparking_knowledge/`**, ejecutar **`run_build_jisparking_rag.ps1`** y reiniciar el API; embeddings deben coincidir (**`OLLAMA_EMBED_MODEL`** / **`OLLAMA_BASE_URL`**) entre build y runtime.
 - Los códigos ANSI (`←[32m`) en consola Windows son normales; para log limpio se puede usar `NO_COLOR` o política de logging de uvicorn.
 
 ---
@@ -157,11 +199,19 @@ Documento vivo para alinear sesiones de desarrollo: qué ya está hecho, qué fa
 
 ---
 
+## Decisión — producción (2026-04-10)
+
+- **Dónde corre el servicio:** **JIS Lab** (agente FastAPI + acceso a **Ollama** en el mismo entorno, sin depender de un túnel hacia el modelo).
+- **MySQL:** sigue en el **VPS**; desde JIS Lab solo hace falta **túnel SSH** (o VPN cuando la tengan) hacia el puerto de la base.
+- **Próxima tarea de infra:** empaquetar y levantar en **Docker** en JIS Lab (compose, `.env`, túnel persistente o equivalente, healthchecks) y dejar **runbook** de deploy. Ver checklist **E** abajo.
+
+---
+
 ## Pendiente para próxima sesión (priorizado)
 
 ### A. Operación y DX
 
-- [ ] **Documentar en README / `instrucciones.txt`:** orden típico (túneles → API :8080 → Streamlit), `AGENT_URL`, y que **`jis-reports` no usa stream de tokens** por defecto en Streamlit (y cómo reactivarlo si en el futuro hay toggle).
+- [ ] **Documentar en README / `instrucciones.txt`:** orden típico (túneles → API :8080 → Streamlit), `AGENT_URL`, y que **`jis-reports` no usa stream de tokens** por defecto en Streamlit (y cómo reactivarlo si en el futuro hay toggle). *(Parcial: flujo Streamlit + RAG descrito en `docs/PREGUNTAS_CHATBOT_REVISADAS.md` y en esta hoja, sesión 2026-04-13.)*
 - [ ] **Opcional:** enlace desde README a **`docs/PREGUNTAS_CHATBOT_REVISADAS.md`** para demos y regresión.
 - [ ] **Opcional:** toggle en Streamlit “Stream de tokens (experimental; Ollama puede mostrar JSON)” solo cuando no sea `jis-reports`, o siempre con aviso.
 - [ ] **Safeguard:** con `GROQ_API_KEY` vacío el log dice *skipping Safeguard* — decidir si se acepta en dev, si se usa otro proveedor, o si se silencia el mensaje en producción.
@@ -173,6 +223,8 @@ Documento vivo para alinear sesiones de desarrollo: qué ya está hecho, qué fa
 
 ### C. Producto y datos
 
+- [ ] **RAG — más corpus:** copiar nuevos `.md`/`.pdf` a `data/jisparking_knowledge/` y re-ejecutar `run_build_jisparking_rag.ps1`; para **solo imagen** usar `image_to_jisparking_knowledge.py` + Tesseract o transcripción manual. Valorar **`servicio_cliente_siniestros_registro_procedimiento.md`** si se quiere paridad con enlaces del protocolo.
+- [ ] **RAG — calidad:** regresión automática o script que compare preguntas §8 vs fragmentos mínimos esperados (sin depender solo de demos manuales).
 - [ ] **`docs/CASOS_PRUEBA_DEPOSITOS.md`** (o sección en PREGUNTAS): matrices Navicat vs agente — pendientes, filtro sucursal, resumen mensual, con/sin OFICINA.
 - [ ] **Validar en BD real** que los literales de **`Estado_Deposito`** coinciden con **`_ESTADOS_DEPOSITO_CANON`**; ajustar constantes si la vista usa variantes.
 - [ ] **Actualizar `docs/CASOS_PRUEBA_SUCURSALES.md`** (o doc KPI): ranking top N, resumen mes, evolución una sucursal; criterio = una tool + respuesta final sin bucles.
@@ -186,6 +238,13 @@ Documento vivo para alinear sesiones de desarrollo: qué ya está hecho, qué fa
 - [ ] **`modo_respuesta="contar"`** en `jis_listar_sucursales` — validar que el modelo lo use en “¿cuántas…?”.
 - [ ] **Túnel MySQL / Ollama:** sin túnel, fallos 10061; mantener mensajes claros en `verify_connectivity.py` y en UI si se desea.
 
+### E. Deploy JIS Lab (Docker + producción)
+
+- [ ] **Docker en JIS Lab:** imagen(es) o `docker compose` para el **servicio del agente** (puerto API, p. ej. 8080); opcional **Streamlit** en el mismo compose o detrás de reverse proxy según producto.
+- [ ] **Variables y red:** `.env` en el host o vía secrets; `DB_HOST`/`DB_PORT` apuntando al **extremo local del túnel** hacia MySQL en el VPS; documentar mismo criterio que `instrucciones.txt` (sin túnel → errores tipo 10061).
+- [ ] **Persistencia del túnel:** `autossh`, unidad **systemd**, o `restart: always` en un contenedor sidecar que mantenga el forward; reconexión ante caída de red.
+- [ ] **Runbook corto:** orden de arranque (túnel → API → UI), healthcheck HTTP, y **prueba de humo** con `docs/PREGUNTAS_CHATBOT_REVISADAS.md`.
+
 ---
 
 ## Pendiente resuelto (referencia rápida)
@@ -195,7 +254,9 @@ Documento vivo para alinear sesiones de desarrollo: qué ya está hecho, qué fa
 | `jis_consultar_kpi_ingresos` sin `success: false` si faltan vars entorno | Corregido sesión 2026-04-10 |
 | Herramientas **depósitos** + anti-bucle `after_tools` | Sesión 2026-04-16 |
 | Collation mix en `QRY_REPORTE_DEPOSITOS` | Sesión 2026-04-16 (`_DEPOSITOS_STRING_COLLATE`) |
+| **RAG** Chroma + Ollama embeddings + tool + síntesis sin bucles | Sesión 2026-04-13 |
+| Heurística RAG para **protocolo / patio / ticket / siniestro** sin palabra «reglamento» | Sesión 2026-04-13 |
 
 ---
 
-*Última actualización: 2026-04-09. Mantener este archivo al cierre de cada sesión de trabajo en el agente / Streamlit.*
+*Última actualización: 2026-04-13. Mantener este archivo al cierre de cada sesión de trabajo en el agente / Streamlit.*

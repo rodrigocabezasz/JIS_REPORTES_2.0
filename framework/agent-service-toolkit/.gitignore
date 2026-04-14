@@ -187,6 +187,8 @@ cython_debug/
 *.db
 *.sqlite3
 *.bin
+# Índice RAG JIS (regenerar con scripts/run_build_jisparking_rag.ps1)
+chroma_jisparking/
 
 # Private Credentials, ignore everything in the folder but the .gitkeep file
 privatecredentials/*
